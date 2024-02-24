@@ -7,7 +7,7 @@ import numpy as np
 
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, embed_dim=4098, dropout = 0.1, max_seq_len=512) -> None:
+    def __init__(self, embed_dim: int, dropout = 0.1, max_seq_len=512) -> None:
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
 
@@ -26,23 +26,30 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 class Model(nn.Module):
-    def __init__(self, boundary_num=80):
+    def __init__(self, d_token=512, nhead=8, boundary_num=80):
         super(Model, self).__init__()
         res50 = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
         self.res50_bone = nn.Sequential(*list(res50.children())[:-2])
-        self.token_embedding = PositionalEncoding()
-        self.layernorm = nn.LayerNorm(4098)
+        self.positional_embedding = PositionalEncoding(d_token)
+        assert (d_token - 2) % 2 == 0
+        self.boundary_embedding = nn.Sequential(
+            nn.LayerNorm(2048),
+            nn.Linear(2048, (d_token - 2) // 2),
+            nn.LayerNorm((d_token - 2) // 2),
+
+        )
+        self.layernorm = nn.LayerNorm(d_token)
         self.transformer_encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
-                d_model=4098,
-                nhead=6,
+                d_model=d_token,
+                nhead=nhead,
                 batch_first=True,
             ),
-            num_layers=4,
+            num_layers=6,
         )
         self.fc_list = nn.ModuleList()
         for i in range(boundary_num):
-            self.fc_list.append(nn.Linear(4098, 2))
+            self.fc_list.append(nn.Linear(d_token, 2))
         self.boundary_num = boundary_num
 
     def forward(
@@ -84,16 +91,18 @@ class Model(nn.Module):
                 return bou_features
 
         pre_bou_features = get_bou_features(pre_img_features, previous_boundary)
-        pre_bou_features = pre_bou_features.permute(0, 2, 1)
         curr_bou_features = get_bou_features(curr_img_features, previous_boundary)
+        pre_bou_features = pre_bou_features.permute(0, 2, 1)
         curr_bou_features = curr_bou_features.permute(0, 2, 1)
+        pre_bou_features = self.boundary_embedding(pre_bou_features)
+        curr_bou_features = self.boundary_embedding(curr_bou_features)
 
         tokens = torch.cat([curr_bou_features, pre_bou_features], dim=2)
         # tokens = torch.cat([tokens, previous_boundary.float() / 224], dim=2)
         tokens = torch.cat([tokens, previous_boundary.float()], dim=2)
 
         tokens = self.layernorm(tokens)
-        tokens = self.token_embedding(tokens)
+        tokens = self.positional_embedding(tokens)
         tokens = self.transformer_encoder(tokens)
 
         results = []
