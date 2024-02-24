@@ -6,11 +6,32 @@ from torchsummary import summary
 import numpy as np
 
 
+class PositionalEncoding(nn.Module):
+    def __init__(self, embed_dim=4098, dropout = 0.1, max_seq_len=512) -> None:
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe = torch.zeros(max_seq_len, embed_dim)
+        position = torch.arange(0, max_seq_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, embed_dim, 2).float() * (-np.log(10000.0) / embed_dim)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer("pe", pe)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.pe[:, : x.size(1)]
+        return self.dropout(x)
+
 class Model(nn.Module):
     def __init__(self, boundary_num=80):
         super(Model, self).__init__()
         res50 = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
         self.res50_bone = nn.Sequential(*list(res50.children())[:-2])
+        self.token_embedding = PositionalEncoding()
+        self.layernorm = nn.LayerNorm(4098)
         self.transformer_encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 d_model=4098,
@@ -71,6 +92,8 @@ class Model(nn.Module):
         # tokens = torch.cat([tokens, previous_boundary.float() / 224], dim=2)
         tokens = torch.cat([tokens, previous_boundary.float()], dim=2)
 
+        tokens = self.layernorm(tokens)
+        tokens = self.token_embedding(tokens)
         tokens = self.transformer_encoder(tokens)
 
         results = []
