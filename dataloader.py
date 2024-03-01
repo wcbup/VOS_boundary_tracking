@@ -5,9 +5,12 @@ import json
 import PIL.Image as Image
 import numpy as np
 import matplotlib.pyplot as plt
+from torch.utils.data import Dataset
+
 
 def normalize_image(x: torch.Tensor) -> torch.Tensor:
     return (x - x.min()) / (x.max() - x.min())
+
 
 class DAVIS_Seq2(torch.utils.data.Dataset):
     def __init__(self, is_uniform=True, is_one_video=False):
@@ -15,7 +18,9 @@ class DAVIS_Seq2(torch.utils.data.Dataset):
             [
                 transforms.Resize((224, 224)),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
             ]
         )
         if is_uniform:
@@ -51,3 +56,41 @@ class DAVIS_Seq2(torch.utils.data.Dataset):
         frame2_boundary = np.array(frame2[2]).astype(np.int32)
         frame2_boundary = torch.Tensor(frame2_boundary).int()
         return frame1_image, frame2_image, frame1_boundary, frame2_boundary
+
+
+class BallDataset(Dataset):
+    def __init__(self, json_path="./ball/uniform_samples_80.json"):
+        self.json_path = json_path
+        self.transform = transforms.Compose(
+            [
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ]
+        )
+        tmp_data = json.load(open(json_path, "r"))
+        self.data = []
+        for i in range(len(tmp_data) - 1):
+            self.data.append((tmp_data[i], tmp_data[i + 1]))
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        frame1, frame2 = self.data[idx]
+        frame1_img = Image.open(frame1[0]).convert("RGB")
+        frame2_img = Image.open(frame2[0]).convert("RGB")
+        frame1_img = self.transform(frame1_img)
+        frame2_img = self.transform(frame2_img)
+        frame1_boundary = np.array(frame1[1]).astype(np.int32)
+        frame1_boundary = torch.tensor(frame1_boundary).int()
+        frame2_boundary = np.array(frame2[1]).astype(np.int32)
+        frame2_boundary = torch.tensor(frame2_boundary).int()
+        return frame1_img, frame2_img, frame1_boundary, frame2_boundary

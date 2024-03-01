@@ -30,12 +30,15 @@ class Model(nn.Module):
     def __init__(
         self,
         d_token=2050,
-        nhead=50,
+        nhead=1,
         boundary_num=80,
     ):
         super(Model, self).__init__()
         res50 = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
         self.res50_bone = nn.Sequential(*list(res50.children())[:-3])
+        # freeze resnet50
+        for param in self.res50_bone.parameters():
+            param.requires_grad = False
         self.positional_embedding = PositionalEncoding(d_token)
         # assert (d_token - 2) % 2 == 0
         # self.boundary_embedding = nn.Sequential(
@@ -43,18 +46,22 @@ class Model(nn.Module):
         #     nn.Linear(1024, (d_token - 2) // 2),
         #     nn.LayerNorm((d_token - 2) // 2),
         # )
-        self.layernorm = nn.LayerNorm(d_token)
+        # self.layernorm = nn.LayerNorm(d_token)
         self.transformer_encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 d_model=d_token,
                 nhead=nhead,
                 batch_first=True,
             ),
-            num_layers=6,
+            num_layers=3,
         )
         self.fc_list = nn.ModuleList()
         for i in range(boundary_num):
-            self.fc_list.append(nn.Linear(d_token, 2))
+            self.fc_list.append(
+                nn.Sequential(
+                    nn.Linear(d_token, 2),
+                )
+            )
         self.boundary_num = boundary_num
 
     def forward(
@@ -108,7 +115,7 @@ class Model(nn.Module):
         # tokens = torch.cat([tokens, previous_boundary.float() / 224], dim=2)
         tokens = torch.cat([tokens, previous_boundary.float()], dim=2)
 
-        tokens = self.layernorm(tokens)
+        # tokens = self.layernorm(tokens)
         tokens = self.positional_embedding(tokens)
         tokens = self.transformer_encoder(tokens)
 
