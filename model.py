@@ -53,7 +53,7 @@ class Model(nn.Module):
                 nhead=nhead,
                 batch_first=True,
             ),
-            num_layers=3,
+            num_layers=1,
         )
         self.fc_list = nn.ModuleList()
         for i in range(boundary_num):
