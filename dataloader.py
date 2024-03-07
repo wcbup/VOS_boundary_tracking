@@ -6,6 +6,7 @@ import PIL.Image as Image
 import numpy as np
 import matplotlib.pyplot as plt
 from torch.utils.data import Dataset
+from preprocess_utensils import get_gray_image
 
 
 def normalize_image(x: torch.Tensor) -> torch.Tensor:
@@ -72,6 +73,7 @@ class BallDataset(Dataset):
         )
         tmp_data = json.load(open(json_path, "r"))
         self.data = []
+        self.data.append((tmp_data[1], tmp_data[0]))
         for i in range(len(tmp_data) - 1):
             self.data.append((tmp_data[i], tmp_data[i + 1]))
 
@@ -93,4 +95,64 @@ class BallDataset(Dataset):
         frame1_boundary = torch.tensor(frame1_boundary).int()
         frame2_boundary = np.array(frame2[1]).astype(np.int32)
         frame2_boundary = torch.tensor(frame2_boundary).int()
-        return frame1_img, frame2_img, frame1_boundary, frame2_boundary
+        return frame1_img, frame2_img, frame1_boundary, frame2_boundary, idx
+
+
+class Balltest(torch.utils.data.Dataset):
+    def __init__(self, json_path="./ball/uniform_samples_80.json"):
+        self.json_path = json_path
+        self.transform = transforms.Compose(
+            [
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ]
+        )
+        self.data = json.load(open(json_path, "r"))
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        img_path, boundary = self.data[idx]
+        img = Image.open(img_path).convert("RGB")
+        img = self.transform(img)
+        sgm = get_gray_image(img_path)
+        boundary = np.array(boundary).astype(np.int32)
+        boundary = torch.tensor(boundary).int()
+        return img, sgm, boundary
+
+
+class DAVIS_test(torch.utils.data.Dataset):
+    def __init__(self, video_name: str, is_uniform=True):
+        self.transform = transforms.Compose(
+            [
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ]
+        )
+        if is_uniform:
+            with open("./uniform_samples_80.json", "r") as f:
+                tmp_data: dict[str, list[tuple[str, str, list]]] = json.loads(f.read())
+        else:
+            with open("./simplify_samples_80.json", "r") as f:
+                tmp_data: dict[str, list[tuple[str, str, list]]] = json.loads(f.read())
+
+        self.data = tmp_data[video_name]
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        img_path, sgm_path, boundary = self.data[idx]
+        img = Image.open(img_path)
+        sgm = get_gray_image(sgm_path)
+        img = self.transform(img)
+        boundary = np.array(boundary).astype(np.int32)
+        boundary = torch.tensor(boundary).int()
+        return img, sgm, boundary
