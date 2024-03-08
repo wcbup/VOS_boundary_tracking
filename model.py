@@ -112,8 +112,8 @@ class Model(nn.Module):
         # curr_bou_features = self.boundary_embedding(curr_bou_features)
 
         tokens = torch.cat([curr_bou_features, pre_bou_features], dim=2)
-        # tokens = torch.cat([tokens, previous_boundary.float() / 224], dim=2)
-        tokens = torch.cat([tokens, previous_boundary.float()], dim=2)
+        tokens = torch.cat([tokens, previous_boundary.float() / 224], dim=2)
+        # tokens = torch.cat([tokens, previous_boundary.float()], dim=2)
 
         # tokens = self.layernorm(tokens)
         tokens = self.positional_embedding(tokens)
@@ -122,5 +122,5 @@ class Model(nn.Module):
         results = []
         for i in range(self.boundary_num):
             results.append(self.fc_list[i](tokens[:, i, :]))
-        # return torch.stack(results, dim=1) * 224
-        return torch.stack(results, dim=1)
+        return torch.stack(results, dim=1) * 224
+        # return torch.stack(results, dim=1)

@@ -95,7 +95,13 @@ class BallDataset(Dataset):
         frame1_boundary = torch.tensor(frame1_boundary).int()
         frame2_boundary = np.array(frame2[1]).astype(np.int32)
         frame2_boundary = torch.tensor(frame2_boundary).int()
-        return frame1_img, frame2_img, frame1_boundary, frame2_boundary, idx
+        if idx > 0:
+            pre_idx = idx - 1
+            curr_idx = idx
+        else:
+            pre_idx = 1
+            curr_idx = 0
+        return frame1_img, frame2_img, frame1_boundary, frame2_boundary, pre_idx, curr_idx
 
 
 class Balltest(torch.utils.data.Dataset):
