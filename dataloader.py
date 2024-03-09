@@ -60,8 +60,9 @@ class DAVIS_Seq2(torch.utils.data.Dataset):
 
 
 class BallDataset(Dataset):
-    def __init__(self, json_path="./ball/uniform_samples_80.json"):
+    def __init__(self, json_path="./ball/uniform_samples_80.json", is_previous=True):
         self.json_path = json_path
+        self.is_previous = is_previous
         self.transform = transforms.Compose(
             [
                 transforms.Resize((224, 224)),
@@ -73,9 +74,14 @@ class BallDataset(Dataset):
         )
         tmp_data = json.load(open(json_path, "r"))
         self.data = []
-        self.data.append((tmp_data[1], tmp_data[0]))
-        for i in range(len(tmp_data) - 1):
-            self.data.append((tmp_data[i], tmp_data[i + 1]))
+        if is_previous:
+            self.data.append((tmp_data[1], tmp_data[0]))
+            for i in range(len(tmp_data) - 1):
+                self.data.append((tmp_data[i], tmp_data[i + 1]))
+        else:
+            for i in range(len(tmp_data) - 1):
+                self.data.append((tmp_data[0], tmp_data[i + 1]))
+
 
     def __len__(self):
         return len(self.data)
@@ -95,7 +101,10 @@ class BallDataset(Dataset):
         frame1_boundary = torch.tensor(frame1_boundary).int()
         frame2_boundary = np.array(frame2[1]).astype(np.int32)
         frame2_boundary = torch.tensor(frame2_boundary).int()
-        if idx > 0:
+        if not self.is_previous:
+            pre_idx = 0
+            curr_idx = idx + 1
+        elif idx > 0:
             pre_idx = idx - 1
             curr_idx = idx
         else:
