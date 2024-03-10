@@ -209,7 +209,7 @@ class NeighborModel(nn.Module):
                 return torch.matmul(
                     query_features.transpose(1, 2).unsqueeze(2),
                     key_features.transpose(1, 2).unsqueeze(2).transpose(2, 3),
-                ).squeeze()
+                ).squeeze((2, 3))
 
             if scale_level > 0:
                 cur_img_freature = F.avg_pool2d(
@@ -268,7 +268,7 @@ class NeighborModel(nn.Module):
             boundary_offset = output[:, :, :2]
             query_offset = output[:, :, 2:]
             curr_boundary = curr_boundary + boundary_offset.long()
-            curr_boundary.clamp(min=0, max=223)
+            curr_boundary = curr_boundary.clamp(min=0, max=223)
             query_features = query_features + query_offset.transpose(1, 2)
             results.append(curr_boundary)
         return results
