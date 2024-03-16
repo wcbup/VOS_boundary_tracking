@@ -60,7 +60,7 @@ class DAVIS_Seq2(torch.utils.data.Dataset):
 
 
 class BallDataset(Dataset):
-    def __init__(self, json_path="./ball/uniform_samples_80.json", is_previous=True):
+    def __init__(self, json_path="./ball/uniform_samples_80.json", is_previous=True, output_first=False):
         self.json_path = json_path
         self.is_previous = is_previous
         self.transform = transforms.Compose(
@@ -73,6 +73,9 @@ class BallDataset(Dataset):
             ]
         )
         tmp_data = json.load(open(json_path, "r"))
+        self.output_first = output_first
+        if output_first:
+            self.first_data = tmp_data[0]
         self.data = []
         if is_previous:
             self.data.append((tmp_data[1], tmp_data[0]))
@@ -110,7 +113,15 @@ class BallDataset(Dataset):
         else:
             pre_idx = 1
             curr_idx = 0
-        return frame1_img, frame2_img, frame1_boundary, frame2_boundary, pre_idx, curr_idx
+        output = (frame1_img, frame2_img, frame1_boundary, frame2_boundary, pre_idx, curr_idx)
+        if self.output_first:
+            first_img = Image.open(self.first_data[0]).convert("RGB")
+            first_img = self.transform(first_img)
+            first_boundary = np.array(self.first_data[1]).astype(np.int32)
+            first_boundary = torch.tensor(first_boundary).int()
+            return first_img, first_boundary, *output
+        else:
+            return output
 
 
 class Balltest(torch.utils.data.Dataset):
