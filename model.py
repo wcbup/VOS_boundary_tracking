@@ -238,10 +238,10 @@ class NeighborModel(nn.Module):
                     )
             return torch.stack(dot_results, dim=2)
 
-        curr_boundary = previous_boundary
+        curr_boundary = previous_boundary.float()
         results = []
         refine_num = 6
-        query_features = get_bou_features(curr_img_features, curr_boundary)
+        query_features = get_bou_features(curr_img_features, previous_boundary)
         for i in range(refine_num):
             dot_patches = []
             for scale_level in range(4):
@@ -309,6 +309,7 @@ class IterativeModel(nn.Module):
         self.boundary_fc = nn.Sequential(
             nn.Linear(d_token, 2),
         )
+        self.refine_num = 3
     
     def forward(
         self,
@@ -350,15 +351,14 @@ class IterativeModel(nn.Module):
                 )
             return bou_features
 
-        curr_boundary = previous_boundary
+        curr_boundary = previous_boundary.float()
         raw_query_features = get_bou_features(pre_img_features, previous_boundary)
         query_features = self.query_encoder(raw_query_features.permute(0, 2, 1))
         results = []
-        refine_num = 3
-        for i in range(refine_num):
-            boundary_features = get_bou_features(curr_img_features, curr_boundary)
+        for i in range(self.refine_num):
+            boundary_features = get_bou_features(curr_img_features, curr_boundary.long())
             boundary_features = boundary_features.permute(0, 2, 1)
-            boundary_tokens = torch.cat([boundary_features, curr_boundary.float()], dim=2)
+            boundary_tokens = torch.cat([boundary_features, curr_boundary], dim=2)
             tokens = torch.cat([query_features, boundary_tokens], dim=1)
             tokens = self.layer_norm(tokens)
             tokens = self.positional_embedding(tokens)
@@ -367,10 +367,10 @@ class IterativeModel(nn.Module):
             query_offset = self.q_offset_fc(query_offset)
             boundary_offset = tokens[:, self.boundary_num:, :]
             boundary_offset = self.boundary_fc(boundary_offset)
-            curr_boundary = curr_boundary + boundary_offset.long()
+            curr_boundary = curr_boundary + boundary_offset
             curr_boundary = curr_boundary.clamp(min=0, max=223)
             query_features = query_features + query_offset
-            results.append((curr_boundary, boundary_offset))
+            results.append(curr_boundary)
         return results
 
 
