@@ -460,6 +460,21 @@ class IterativeModel_Con(nn.Module):
             results.append(curr_boundary)
         return results
 
+def find_best_shift(boundary0: torch.Tensor, boundary1:torch.Tensor):
+    def get_one_best_shift(boundary0: torch.Tensor, boundary1:torch.Tensor):
+        best_shift = 0
+        min_distance = (boundary0 - boundary1).abs().sum().item()
+        for i in range(boundary0.shape[0]):
+            distance = (boundary0 - boundary1.roll(i, 0)).abs().sum().item()
+            if distance < min_distance:
+                min_distance = distance
+                best_shift = i
+        return best_shift
+    results = []
+    for i in range(boundary0.shape[0]):
+        results.append(get_one_best_shift(boundary0[i], boundary1[i]))
+    
+    return results
 
 class IterativeModelWithFirst(nn.Module):
     def __init__(
@@ -505,6 +520,9 @@ class IterativeModelWithFirst(nn.Module):
         current_frame: torch.Tensor,
         previous_boundary: torch.Tensor,
     ) -> torch.Tensor:
+        best_shift = find_best_shift(previous_boundary, first_boundary)
+        for i in range(len(best_shift)):
+            first_boundary[i] = first_boundary[i].roll(best_shift[i], 0)
         pre_img_features = self.res50_bone(previous_frame)
         pre_img_features = F.interpolate(
             pre_img_features,
