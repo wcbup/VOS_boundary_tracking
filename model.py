@@ -625,6 +625,9 @@ class IterativeModelWithFirst_Con(nn.Module):
         current_frame: torch.Tensor,
         previous_boundary: torch.Tensor,
     ) -> torch.Tensor:
+        best_shift = find_best_shift(previous_boundary, first_boundary)
+        for i in range(len(best_shift)):
+            first_boundary[i] = first_boundary[i].roll(best_shift[i], 0)
         pre_img_features = self.res50_bone(previous_frame)
         pre_img_features = F.interpolate(
             pre_img_features,
@@ -665,22 +668,22 @@ class IterativeModelWithFirst_Con(nn.Module):
                 )
             return bou_features
         
-        def get_best_match(feature0: torch.Tensor, feature1: torch.Tensor):
-            best_shift = 0
-            best_similarity = (feature0 * feature1).sum() 
-            for shift in range(feature0.shape[1]):
-                similarity = (feature0 * feature1.roll(shift, dims=1)).sum()
-                if similarity > best_similarity:
-                    best_similarity = similarity
-                    best_shift = shift
-            return feature0, feature1.roll(best_shift, dims=1)
+        # def get_best_match(feature0: torch.Tensor, feature1: torch.Tensor):
+        #     best_shift = 0
+        #     best_similarity = (feature0 * feature1).sum() 
+        #     for shift in range(feature0.shape[1]):
+        #         similarity = (feature0 * feature1.roll(shift, dims=1)).sum()
+        #         if similarity > best_similarity:
+        #             best_similarity = similarity
+        #             best_shift = shift
+        #     return feature0, feature1.roll(best_shift, dims=1)
 
         curr_boundary = previous_boundary.float()
         raw_query_features = get_bou_features(pre_img_features, previous_boundary)
         pre_query_features = raw_query_features.permute(0, 2, 1)
         first_queary_features = get_bou_features(first_img_features, first_boundary)
         first_queary_features = first_queary_features.permute(0, 2, 1)
-        pre_query_features, first_queary_features = get_best_match(pre_query_features, first_queary_features)
+        # pre_query_features, first_queary_features = get_best_match(pre_query_features, first_queary_features)
         results = []
         for i in range(self.refine_num):
             boundary_features = get_bou_features(curr_img_features, curr_boundary.long())
