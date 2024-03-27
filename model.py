@@ -25,6 +25,26 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:, : x.size(1)]
         return self.dropout(x)
 
+def get_bou_features(
+    img_features: torch.Tensor, boundary: torch.Tensor
+) -> torch.Tensor:
+    bou_features = img_features[
+        0, :, boundary[0, :, 0], boundary[0, :, 1]
+    ].unsqueeze(0)
+    for i in range(1, boundary.shape[0]):
+        bou_features = torch.cat(
+            (
+                bou_features,
+                img_features[
+                    i,
+                    :,
+                    boundary[i, :, 0],
+                    boundary[i, :, 1],
+                ].unsqueeze(0),
+            ),
+            dim=0,
+        )
+    return bou_features
 
 class Model(nn.Module):
     def __init__(
@@ -82,27 +102,6 @@ class Model(nn.Module):
             size=(224, 224),
             mode="bilinear",
         )
-
-        def get_bou_features(
-            img_features: torch.Tensor, boundary: torch.Tensor
-        ) -> torch.Tensor:
-            bou_features = img_features[
-                0, :, boundary[0, :, 0], boundary[0, :, 1]
-            ].unsqueeze(0)
-            for i in range(1, boundary.shape[0]):
-                bou_features = torch.cat(
-                    (
-                        bou_features,
-                        img_features[
-                            i,
-                            :,
-                            boundary[i, :, 0],
-                            boundary[i, :, 1],
-                        ].unsqueeze(0),
-                    ),
-                    dim=0,
-                )
-            return bou_features
 
         pre_bou_features = get_bou_features(pre_img_features, previous_boundary)
         curr_bou_features = get_bou_features(curr_img_features, previous_boundary)
@@ -179,26 +178,6 @@ class NeighborModel(nn.Module):
             mode="bilinear",
         )
 
-        def get_bou_features(
-            img_features: torch.Tensor, boundary: torch.Tensor
-        ) -> torch.Tensor:
-            bou_features = img_features[
-                0, :, boundary[0, :, 0], boundary[0, :, 1]
-            ].unsqueeze(0)
-            for i in range(1, boundary.shape[0]):
-                bou_features = torch.cat(
-                    (
-                        bou_features,
-                        img_features[
-                            i,
-                            :,
-                            boundary[i, :, 0],
-                            boundary[i, :, 1],
-                        ].unsqueeze(0),
-                    ),
-                    dim=0,
-                )
-            return bou_features
 
         def get_neighbor_dot(
             query_features: torch.Tensor,
@@ -329,27 +308,6 @@ class IterativeModel(nn.Module):
             mode="bilinear",
         )
 
-        def get_bou_features(
-            img_features: torch.Tensor, boundary: torch.Tensor
-        ) -> torch.Tensor:
-            bou_features = img_features[
-                0, :, boundary[0, :, 0], boundary[0, :, 1]
-            ].unsqueeze(0)
-            for i in range(1, boundary.shape[0]):
-                bou_features = torch.cat(
-                    (
-                        bou_features,
-                        img_features[
-                            i,
-                            :,
-                            boundary[i, :, 0],
-                            boundary[i, :, 1],
-                        ].unsqueeze(0),
-                    ),
-                    dim=0,
-                )
-            return bou_features
-
         curr_boundary = previous_boundary.float()
         raw_query_features = get_bou_features(pre_img_features, previous_boundary)
         query_features = self.query_encoder(raw_query_features.permute(0, 2, 1))
@@ -418,27 +376,6 @@ class IterativeModel_Con(nn.Module):
             size=(224, 224),
             mode="bilinear",
         )
-
-        def get_bou_features(
-            img_features: torch.Tensor, boundary: torch.Tensor
-        ) -> torch.Tensor:
-            bou_features = img_features[
-                0, :, boundary[0, :, 0], boundary[0, :, 1]
-            ].unsqueeze(0)
-            for i in range(1, boundary.shape[0]):
-                bou_features = torch.cat(
-                    (
-                        bou_features,
-                        img_features[
-                            i,
-                            :,
-                            boundary[i, :, 0],
-                            boundary[i, :, 1],
-                        ].unsqueeze(0),
-                    ),
-                    dim=0,
-                )
-            return bou_features
 
         curr_boundary = previous_boundary.float()
         query_features = get_bou_features(pre_img_features, previous_boundary)
@@ -548,27 +485,6 @@ class IterativeModelWithFirst(nn.Module):
             mode="bilinear",
         )
 
-        def get_bou_features(
-            img_features: torch.Tensor, boundary: torch.Tensor
-        ) -> torch.Tensor:
-            bou_features = img_features[
-                0, :, boundary[0, :, 0], boundary[0, :, 1]
-            ].unsqueeze(0)
-            for i in range(1, boundary.shape[0]):
-                bou_features = torch.cat(
-                    (
-                        bou_features,
-                        img_features[
-                            i,
-                            :,
-                            boundary[i, :, 0],
-                            boundary[i, :, 1],
-                        ].unsqueeze(0),
-                    ),
-                    dim=0,
-                )
-            return bou_features
-
         curr_boundary = previous_boundary.float()
         raw_query_features = get_bou_features(pre_img_features, previous_boundary)
         query_features = self.query_encoder(raw_query_features.permute(0, 2, 1))
@@ -674,26 +590,6 @@ class IterativeModelWithFirst_Nei(nn.Module):
             mode="bilinear",
         )
 
-        def get_bou_features(
-            img_features: torch.Tensor, boundary: torch.Tensor
-        ) -> torch.Tensor:
-            bou_features = img_features[
-                0, :, boundary[0, :, 0], boundary[0, :, 1]
-            ].unsqueeze(0)
-            for i in range(1, boundary.shape[0]):
-                bou_features = torch.cat(
-                    (
-                        bou_features,
-                        img_features[
-                            i,
-                            :,
-                            boundary[i, :, 0],
-                            boundary[i, :, 1],
-                        ].unsqueeze(0),
-                    ),
-                    dim=0,
-                )
-            return bou_features
 
         def get_neighbor_features_with_scales(
             img_features: torch.Tensor, boundary: torch.Tensor, scale_levels: list[int]
@@ -832,27 +728,6 @@ class IterativeModelWithFirst_Con(nn.Module):
             size=(224, 224),
             mode="bilinear",
         )
-
-        def get_bou_features(
-            img_features: torch.Tensor, boundary: torch.Tensor
-        ) -> torch.Tensor:
-            bou_features = img_features[
-                0, :, boundary[0, :, 0], boundary[0, :, 1]
-            ].unsqueeze(0)
-            for i in range(1, boundary.shape[0]):
-                bou_features = torch.cat(
-                    (
-                        bou_features,
-                        img_features[
-                            i,
-                            :,
-                            boundary[i, :, 0],
-                            boundary[i, :, 1],
-                        ].unsqueeze(0),
-                    ),
-                    dim=0,
-                )
-            return bou_features
 
         # def get_best_match(feature0: torch.Tensor, feature1: torch.Tensor):
         #     best_shift = 0
