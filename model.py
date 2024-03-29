@@ -47,6 +47,62 @@ def get_bou_features(
         )
     return bou_features
 
+
+class UNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        f_dim = 512
+
+        # encoder (downsampling)
+        self.enc_conv0 = nn.Conv2d(3, f_dim, 3, padding=1)
+        self.pool0 = nn.MaxPool2d(2, 2)  # 128 -> 64
+        self.enc_conv1 = nn.Conv2d(f_dim, f_dim, 3, padding=1)
+        self.pool1 = nn.MaxPool2d(2, 2)  # 64 -> 32
+        self.enc_conv2 = nn.Conv2d(f_dim, f_dim, 3, padding=1)
+        self.pool2 = nn.MaxPool2d(2, 2)  # 32 -> 16
+        self.enc_conv3 = nn.Conv2d(f_dim, f_dim, 3, padding=1)
+        self.pool3 = nn.MaxPool2d(2, 2)  # 16 -> 8
+
+        # bottleneck
+        self.bottleneck_conv = nn.Conv2d(f_dim, f_dim, 3, padding=1)
+
+        # decoder (upsampling)
+        self.upsample0 = nn.Upsample(16)  # 8 -> 16
+        self.dec_conv0 = nn.Conv2d(f_dim * 2, f_dim, 3, padding=1)
+        self.upsample1 = nn.Upsample(32)  # 16 -> 32
+        self.dec_conv1 = nn.Conv2d(f_dim * 2, f_dim, 3, padding=1)
+        self.upsample2 = nn.Upsample(64)  # 32 -> 64
+        self.dec_conv2 = nn.Conv2d(f_dim * 2, f_dim, 3, padding=1)
+        self.upsample3 = nn.Upsample(128)  # 64 -> 128
+        self.dec_conv3 = nn.Conv2d(f_dim * 2, f_dim * 2, 3, padding=1)
+
+    def forward(self, x):
+        # encoder
+        e0 = F.relu(self.enc_conv0(x))
+        e1 = F.relu(self.enc_conv1(self.pool0(e0)))
+        e2 = F.relu(self.enc_conv2(self.pool1(e1)))
+        e3 = F.relu(self.enc_conv3(self.pool2(e2)))
+        # e2 = self.pool2(F.relu(self.enc_conv2(e1)))
+        # e3 = self.pool3(F.relu(self.enc_conv3(e2)))
+
+        # bottleneck
+        b = F.relu(self.bottleneck_conv(self.pool3(e3)))
+
+        # decoder
+        # d0 = F.relu(self.dec_conv0(self.upsample0(b)))
+        # d1 = F.relu(self.dec_conv1(self.upsample1(d0)))
+        # d2 = F.relu(self.dec_conv2(self.upsample2(d1)))
+        # d3 = self.dec_conv3(self.upsample3(d2))  # no activation
+        # print(self.upsample0(b).shape)
+        # print(e3.shape)
+        # print(torch.cat([e3, self.upsample0(b)], 1).shape)
+        d0 = F.relu(self.dec_conv0(torch.cat([e3, self.upsample0(b)], 1)))
+        d1 = F.relu(self.dec_conv1(torch.cat([e2, self.upsample1(d0)], 1)))
+        d2 = F.relu(self.dec_conv2(torch.cat([e1, self.upsample2(d1)], 1)))
+        d3 = self.dec_conv3(torch.cat([e0, self.upsample3(d2)], 1))
+        return d3
+
 class Model(nn.Module):
     def __init__(
         self,
@@ -882,7 +938,7 @@ class IterWholeFirst(nn.Module):
             pre_query = self.q_token_fc(pre_query.permute(0, 2, 1))
 
 
-        resuls = []
+        results = []
         for _ in range(self.refine_num):
             boundary_features = get_bou_features(
                 cur_img_feature,
@@ -917,8 +973,128 @@ class IterWholeFirst(nn.Module):
             boundary_offset = self.xy_offset_fc(boundary_offset)
             cur_boundary = cur_boundary + boundary_offset
             cur_boundary = cur_boundary.clamp(min=0, max=223)
-            resuls.append(cur_boundary)
-        return resuls
+            results.append(cur_boundary)
+        return results
 
 
         
+class IterWholeFirst_Con(nn.Module):
+    def __init__(self):
+        super(IterWholeFirst_Con, self).__init__()
+
+        self.boundary_num = 80
+        self.refine_num = 3
+        res50 = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+        self.res50_bone = nn.Sequential(*list(res50.children())[:-3])
+        # freeze resnet50
+        for param in self.res50_bone.parameters():
+            param.requires_grad = False
+        
+        d_token = 1024
+        self.positional_embedding = PositionalEncoding(d_token)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_token,
+            nhead=4,
+            batch_first=True,
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=1,
+        )
+        self.output_encoder = nn.Sequential(
+            nn.Linear(d_token, 2),
+        )
+        self.query_encoder = nn.Sequential(
+            nn.Linear((1024 + 2) * 3, d_token),
+            nn.LayerNorm(d_token),
+        )
+        self.layer_norm = nn.LayerNorm(d_token)
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_token,
+            nhead=4,
+            batch_first=True,
+        )
+        self.transformer_decoder = nn.TransformerDecoder(
+            decoder_layer,
+            num_layers=1,
+        )
+    
+    def forward(
+        self,
+        first_frame: torch.Tensor,
+        first_boundary: torch.Tensor,
+        previous_frame: torch.Tensor,
+        current_frame: torch.Tensor,
+        previous_boundary: torch.Tensor,
+    ) -> torch.Tensor:
+        best_shift = find_best_shift(previous_boundary, first_boundary)
+        for i in range(len(best_shift)):
+            first_boundary[i] = first_boundary[i].roll(best_shift[i], 0)
+        pre_raw_img_features = self.res50_bone(previous_frame)
+        first_raw_img_features = self.res50_bone(first_frame)
+        curr_raw_img_features = self.res50_bone(current_frame)
+
+        pre_img_tokens = get_img_tokens(pre_raw_img_features)
+        cur_img_tokens = get_img_tokens(curr_raw_img_features)
+        first_img_tokens = get_img_tokens(first_raw_img_features)
+
+        img_tokens = torch.cat([pre_img_tokens, cur_img_tokens, first_img_tokens], dim=1)
+        img_tokens = self.layer_norm(img_tokens)
+        memory = self.transformer_encoder(img_tokens)
+
+        first_img_features = F.interpolate(
+            first_raw_img_features,
+            size=(224, 224),
+            mode="bilinear",
+        )
+        pre_img_features = F.interpolate(
+            pre_raw_img_features,
+            size=(224, 224),
+            mode="bilinear",
+        )
+        cur_img_feature = F.interpolate(
+            curr_raw_img_features,
+            size=(224, 224),
+            mode="bilinear",
+        )
+
+        cur_boundary = previous_boundary.float()
+        first_query = get_bou_features(first_img_features, first_boundary)
+        pre_query = get_bou_features(pre_img_features, previous_boundary)
+        first_query = first_query.permute(0, 2, 1)
+        pre_query = pre_query.permute(0, 2, 1)
+
+        first_query = torch.cat([first_query, first_boundary.float()], dim=2)
+        pre_query = torch.cat([pre_query, previous_boundary.float()], dim=2)
+
+        results = []
+        for _ in range(self.boundary_num):
+            cur_boundary = cur_boundary.clamp(min=0, max=223)
+            boundary_features = get_bou_features(
+                cur_img_feature,
+                cur_boundary.long()
+            )
+            boundary_features = boundary_features.permute(0, 2, 1)
+            boundary_tokens = torch.cat(
+                [boundary_features, cur_boundary],
+                dim=2
+            )
+
+            input_tokens = torch.cat(
+                [pre_query, boundary_tokens, first_query],
+                dim=2
+            )
+            input_tokens = self.query_encoder(input_tokens)
+            input_tokens = self.layer_norm(input_tokens)
+            input_tokens = self.positional_embedding(input_tokens)
+
+            output_tokens = self.transformer_decoder(
+                input_tokens,
+                memory,
+            )
+
+            boundary_offset = self.output_encoder(output_tokens)
+            cur_boundary = cur_boundary + boundary_offset
+            results.append(cur_boundary)
+        return results
+
