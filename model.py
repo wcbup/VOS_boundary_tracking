@@ -777,9 +777,10 @@ def get_img_tokens(img_features: torch.Tensor) -> torch.Tensor:
     return img_tokens
 
 class IterWholeFirst(nn.Module):
-    def __init__(self):
+    def __init__(self, add_xy_in_token=False):
         super(IterWholeFirst, self).__init__()
         
+        self.add_xy_in_token = add_xy_in_token
         self.boundary_num = 80
         self.refine_num = 3
         res50 = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
@@ -804,10 +805,11 @@ class IterWholeFirst(nn.Module):
             nn.LayerNorm(d_token),
         )
         
-        self.q_token_fc = nn.Sequential(
-            nn.Linear(1024, d_token),
-            nn.LayerNorm(d_token),
-        )
+        if not add_xy_in_token:
+            self.q_token_fc = nn.Sequential(
+                nn.Linear(1024, d_token),
+                nn.LayerNorm(d_token),
+            )
         self.layernorm = nn.LayerNorm(d_token)
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_token,
@@ -818,9 +820,10 @@ class IterWholeFirst(nn.Module):
             decoder_layer,
             num_layers=1,
         )
-        self.q_offset_fc = nn.Sequential(
-            nn.Linear(d_token, d_token),
-        )
+        if not add_xy_in_token:
+            self.q_offset_fc = nn.Sequential(
+                nn.Linear(d_token, d_token),
+            )
         self.xy_offset_fc = nn.Sequential(
             nn.Linear(d_token, 2),
         )
@@ -869,13 +872,15 @@ class IterWholeFirst(nn.Module):
         first_query = get_bou_features(first_img_features, first_boundary)
         pre_query = get_bou_features(pre_img_features, previous_boundary)
 
-        first_query = self.q_token_fc(first_query.permute(0, 2, 1))
-        pre_query = self.q_token_fc(pre_query.permute(0, 2, 1))
+        if self.add_xy_in_token:
+            first_query = first_query.permute(0, 2, 1)
+            pre_query = pre_query.permute(0, 2, 1)
+            first_query = torch.cat([first_query, first_boundary.float()], dim=2)
+            pre_query = torch.cat([pre_query, previous_boundary.float()], dim=2)
+        else:
+            first_query = self.q_token_fc(first_query.permute(0, 2, 1))
+            pre_query = self.q_token_fc(pre_query.permute(0, 2, 1))
 
-        # first_query = first_query.permute(0, 2, 1)
-        # pre_query = pre_query.permute(0, 2, 1)
-        # first_query = torch.cat([first_query, first_boundary.float()], dim=2)
-        # pre_query = torch.cat([pre_query, previous_boundary.float()], dim=2)
 
         resuls = []
         for _ in range(self.refine_num):
@@ -899,9 +904,10 @@ class IterWholeFirst(nn.Module):
                 memory,
             )
 
-            query_offset = output_tokens[:, :self.boundary_num, :]
-            query_offset = self.q_offset_fc(query_offset)
-            pre_query = pre_query + query_offset
+            if not self.add_xy_in_token:
+                query_offset = output_tokens[:, :self.boundary_num, :]
+                query_offset = self.q_offset_fc(query_offset)
+                pre_query = pre_query + query_offset
 
             boundary_offset = output_tokens[
                 :, 
