@@ -56,25 +56,25 @@ class UNet(nn.Module):
 
         # encoder (downsampling)
         self.enc_conv0 = nn.Conv2d(3, f_dim, 3, padding=1)
-        self.pool0 = nn.MaxPool2d(2, 2)  # 128 -> 64
+        self.pool0 = nn.MaxPool2d(2, 2)  # 224 -> 112
         self.enc_conv1 = nn.Conv2d(f_dim, f_dim, 3, padding=1)
-        self.pool1 = nn.MaxPool2d(2, 2)  # 64 -> 32
+        self.pool1 = nn.MaxPool2d(2, 2)  # 112 -> 56
         self.enc_conv2 = nn.Conv2d(f_dim, f_dim, 3, padding=1)
-        self.pool2 = nn.MaxPool2d(2, 2)  # 32 -> 16
+        self.pool2 = nn.MaxPool2d(2, 2)  # 56 -> 28
         self.enc_conv3 = nn.Conv2d(f_dim, f_dim, 3, padding=1)
-        self.pool3 = nn.MaxPool2d(2, 2)  # 16 -> 8
+        self.pool3 = nn.MaxPool2d(2, 2)  # 28 -> 14
 
         # bottleneck
         self.bottleneck_conv = nn.Conv2d(f_dim, f_dim, 3, padding=1)
 
         # decoder (upsampling)
-        self.upsample0 = nn.Upsample(16)  # 8 -> 16
+        self.upsample0 = nn.Upsample(28)  # 14 -> 28
         self.dec_conv0 = nn.Conv2d(f_dim * 2, f_dim, 3, padding=1)
-        self.upsample1 = nn.Upsample(32)  # 16 -> 32
+        self.upsample1 = nn.Upsample(56)  # 28 -> 56
         self.dec_conv1 = nn.Conv2d(f_dim * 2, f_dim, 3, padding=1)
-        self.upsample2 = nn.Upsample(64)  # 32 -> 64
+        self.upsample2 = nn.Upsample(112)  # 56 -> 112
         self.dec_conv2 = nn.Conv2d(f_dim * 2, f_dim, 3, padding=1)
-        self.upsample3 = nn.Upsample(128)  # 64 -> 128
+        self.upsample3 = nn.Upsample(224)  # 112 -> 224
         self.dec_conv3 = nn.Conv2d(f_dim * 2, f_dim * 2, 3, padding=1)
 
     def forward(self, x):
@@ -95,6 +95,9 @@ class UNet(nn.Module):
         # d2 = F.relu(self.dec_conv2(self.upsample2(d1)))
         # d3 = self.dec_conv3(self.upsample3(d2))  # no activation
         # print(self.upsample0(b).shape)
+        # print(e0.shape)
+        # print(e1.shape)
+        # print(e2.shape)
         # print(e3.shape)
         # print(torch.cat([e3, self.upsample0(b)], 1).shape)
         d0 = F.relu(self.dec_conv0(torch.cat([e3, self.upsample0(b)], 1)))
@@ -833,7 +836,7 @@ def get_img_tokens(img_features: torch.Tensor) -> torch.Tensor:
     return img_tokens
 
 class IterWholeFirst(nn.Module):
-    def __init__(self, add_xy_in_token=False):
+    def __init__(self, add_xy_in_token=False, use_unet=False):
         super(IterWholeFirst, self).__init__()
         
         self.add_xy_in_token = add_xy_in_token
@@ -866,6 +869,9 @@ class IterWholeFirst(nn.Module):
                 nn.Linear(1024, d_token),
                 nn.LayerNorm(d_token),
             )
+        self.use_unet = use_unet
+        if use_unet:
+            self.unet = UNet()
         self.layernorm = nn.LayerNorm(d_token)
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_token,
@@ -908,21 +914,26 @@ class IterWholeFirst(nn.Module):
         img_tokens = self.positional_embedding(img_tokens)
         memory = self.transformer_encoder(img_tokens)
 
-        first_img_features = F.interpolate(
-            first_raw_img_features,
-            size=(224, 224),
-            mode="bilinear",
-        )
-        pre_img_features = F.interpolate(
-            pre_raw_img_features,
-            size=(224, 224),
-            mode="bilinear",
-        )
-        cur_img_feature = F.interpolate(
-            curr_raw_img_features,
-            size=(224, 224),
-            mode="bilinear",
-        )   
+        if self.use_unet:
+            first_img_features = self.unet(first_frame)
+            pre_img_features = self.unet(previous_frame)
+            cur_img_feature = self.unet(current_frame)
+        else:
+            first_img_features = F.interpolate(
+                first_raw_img_features,
+                size=(224, 224),
+                mode="bilinear",
+            )
+            pre_img_features = F.interpolate(
+                pre_raw_img_features,
+                size=(224, 224),
+                mode="bilinear",
+            )
+            cur_img_feature = F.interpolate(
+                curr_raw_img_features,
+                size=(224, 224),
+                mode="bilinear",
+            )   
 
         cur_boundary = previous_boundary.float()
         first_query = get_bou_features(first_img_features, first_boundary)
@@ -940,6 +951,7 @@ class IterWholeFirst(nn.Module):
 
         results = []
         for _ in range(self.refine_num):
+            cur_boundary = cur_boundary.clamp(min=0, max=223)
             boundary_features = get_bou_features(
                 cur_img_feature,
                 cur_boundary.long()
@@ -972,7 +984,6 @@ class IterWholeFirst(nn.Module):
             ]
             boundary_offset = self.xy_offset_fc(boundary_offset)
             cur_boundary = cur_boundary + boundary_offset
-            cur_boundary = cur_boundary.clamp(min=0, max=223)
             results.append(cur_boundary)
         return results
 
@@ -990,11 +1001,12 @@ class IterWholeFirst_Con(nn.Module):
         for param in self.res50_bone.parameters():
             param.requires_grad = False
         
-        d_token = 1024
+        d_token = (1024 + 2) * 3
+        head_num = 1
         self.positional_embedding = PositionalEncoding(d_token)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_token,
-            nhead=4,
+            nhead=head_num,
             batch_first=True,
         )
         self.transformer_encoder = nn.TransformerEncoder(
@@ -1005,13 +1017,17 @@ class IterWholeFirst_Con(nn.Module):
             nn.Linear(d_token, 2),
         )
         self.query_encoder = nn.Sequential(
-            nn.Linear((1024 + 2) * 3, d_token),
+            # nn.Linear((1024 + 2) * 3, d_token),
             nn.LayerNorm(d_token),
         )
         self.layer_norm = nn.LayerNorm(d_token)
+        self.img_token_fc = nn.Sequential(
+            nn.Linear(1024, d_token),
+            nn.LayerNorm(d_token),
+        )
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_token,
-            nhead=4,
+            nhead=head_num,
             batch_first=True,
         )
         self.transformer_decoder = nn.TransformerDecoder(
@@ -1039,7 +1055,8 @@ class IterWholeFirst_Con(nn.Module):
         first_img_tokens = get_img_tokens(first_raw_img_features)
 
         img_tokens = torch.cat([pre_img_tokens, cur_img_tokens, first_img_tokens], dim=1)
-        img_tokens = self.layer_norm(img_tokens)
+        img_tokens = self.img_token_fc(img_tokens)
+        img_tokens = self.positional_embedding(img_tokens)
         memory = self.transformer_encoder(img_tokens)
 
         first_img_features = F.interpolate(
@@ -1085,7 +1102,6 @@ class IterWholeFirst_Con(nn.Module):
                 dim=2
             )
             input_tokens = self.query_encoder(input_tokens)
-            input_tokens = self.layer_norm(input_tokens)
             input_tokens = self.positional_embedding(input_tokens)
 
             output_tokens = self.transformer_decoder(
