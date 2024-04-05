@@ -60,18 +60,21 @@ class DAVIS_Seq2(torch.utils.data.Dataset):
 
 
 class BallDataset(Dataset):
-    def __init__(self, json_path="./ball/uniform_samples_80.json", is_previous=True, output_first=False):
+    def __init__(self, json_path="./ball/uniform_samples_80.json", is_previous=True, output_first=False, transform=None):
         self.json_path = json_path
         self.is_previous = is_previous
-        self.transform = transforms.Compose(
-            [
-                transforms.Resize((224, 224)),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-                ),
-            ]
-        )
+        if transform is None:
+            self.transform = transforms.Compose(
+                [
+                    transforms.Resize((224, 224)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                    ),
+                ]
+            )
+        else:
+            self.transform = transform
         tmp_data = json.load(open(json_path, "r"))
         self.output_first = output_first
         if output_first:
