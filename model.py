@@ -1200,3 +1200,108 @@ class BaseFeatup(nn.Module):
             cur_boundary = cur_boundary + bou_offset
             results.append(cur_boundary)
         return results
+
+class DLV3_backbone(nn.Module):
+    def __init__(self):
+        super(DLV3_backbone, self).__init__()
+        self.backbone = torch.hub.load('pytorch/vision:v0.10.0', 'deeplabv3_resnet50', pretrained=True)
+        self.backbone.classifier = nn.Identity()
+    
+    def forward(self, x):
+        return self.backbone(x)["out"]
+
+class BaseDLV3(nn.Module):
+    def __init__(self):
+        super(BaseDLV3, self).__init__()
+        self.refine_num = 3
+        self.boundary_num = 80
+
+        d_token = 2048 + 2
+        self.backbone = DLV3_backbone()
+        # freeze backbone
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+        self.img_token_fc = nn.Sequential(
+            nn.Linear(2048, d_token),
+            nn.LayerNorm(d_token),
+        )
+        self.layernorm = nn.LayerNorm(d_token)
+        self.positional_embedding = PositionalEncoding(d_token, max_seq_len=4096)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_token,
+            nhead=1,
+            batch_first=True,
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=1,
+        )
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_token,
+            nhead=1,
+            batch_first=True,
+        )
+        self.transformer_decoder = nn.TransformerDecoder(
+            decoder_layer=decoder_layer,
+            num_layers=1,
+        )
+        self.xy_offset_fc = nn.Sequential(
+            nn.Linear(d_token, 2),
+        )
+
+    def forward(
+        self,
+        first_frame: torch.Tensor,
+        first_boundary: torch.Tensor,
+        previous_frame: torch.Tensor,
+        current_frame: torch.Tensor,
+        previous_boundary: torch.Tensor,
+    ) -> torch.Tensor:
+        best_shift = find_best_shift(previous_boundary, first_boundary)
+        for i in range(len(best_shift)):
+            first_boundary[i] = first_boundary[i].roll(best_shift[i], 0)
+
+        pre_raw_img_feats = self.backbone.backbone.backbone(previous_frame)["out"]
+        first_raw_img_feats = self.backbone.backbone.backbone(first_frame)["out"]
+        cur_raw_img_feats = self.backbone.backbone.backbone(current_frame)["out"]
+
+        pre_img_tokens = get_img_tokens(pre_raw_img_feats)
+        cur_img_tokens = get_img_tokens(cur_raw_img_feats)
+        first_img_tokens = get_img_tokens(first_raw_img_feats)
+
+        img_tokens = torch.cat(
+            [pre_img_tokens, cur_img_tokens, first_img_tokens], dim=1
+        )
+        img_tokens = self.img_token_fc(img_tokens)
+        img_tokens = self.layernorm(img_tokens)
+        img_tokens = self.positional_embedding(img_tokens)
+        memory = self.transformer_encoder(img_tokens)
+
+        pre_img_features = self.backbone(previous_frame)
+        cur_img_features = self.backbone(current_frame)
+        first_img_features = self.backbone(first_frame)
+
+        pre_bou_feats = get_bou_features(pre_img_features, previous_boundary)
+        first_bou_feats = get_bou_features(first_img_features, first_boundary)
+        pre_bou_feats = pre_bou_feats.permute(0, 2, 1)
+        first_bou_feats = first_bou_feats.permute(0, 2, 1)
+
+        first_tokens = torch.cat([first_bou_feats, first_boundary.float()], dim=2)
+        pre_tokens = torch.cat([pre_bou_feats, previous_boundary.float()], dim=2)
+
+        results = []
+        cur_boundary = previous_boundary.float()
+        for _ in range(self.refine_num):
+            cur_boundary = cur_boundary.clamp(min=0, max=223)
+            cur_bou_feats = get_bou_features(cur_img_features, cur_boundary.long())
+            cur_bou_feats = cur_bou_feats.permute(0, 2, 1)
+            cur_tokens = torch.cat([cur_bou_feats, cur_boundary], dim=2)
+            input_tokens = torch.cat([pre_tokens, cur_tokens, first_tokens], dim=1)
+            input_tokens = self.layernorm(input_tokens)
+            input_tokens = self.positional_embedding(input_tokens)
+            output_tokens = self.transformer_decoder(input_tokens, memory)
+            bou_offset = output_tokens[:, self.boundary_num : 2 * self.boundary_num, :]
+            bou_offset = self.xy_offset_fc(bou_offset)
+            cur_boundary = cur_boundary + bou_offset
+            results.append(cur_boundary)
+        return results
