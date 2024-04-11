@@ -4,6 +4,13 @@ import cv2 as cv
 import matplotlib.pyplot as plt
 from typing import Callable
 from shapely import Polygon, Point
+import glob
+from pathlib import PureWindowsPath
+
+
+def get_all_png_files(root: str) -> list[str]:
+    result = glob.glob(f"{root}/**/*.png", recursive=True)
+    return [PureWindowsPath(x).as_posix() for x in result]
 
 
 def get_boundary_iou(image: np.array, boundary: np.ndarray) -> float:
@@ -23,6 +30,11 @@ def get_gray_image(file_name: str, image_size=224) -> np.ndarray:
     """
     image = cv.imread(file_name)
     image = cv.resize(image, (image_size, image_size))
+    def get_white_part(image: np.ndarray) -> np.ndarray:
+        white_mask = np.zeros_like(image) + 255
+        black_mask = np.zeros_like(image)
+        return np.where((image == [255, 255, 255]).all(axis=-1)[..., None], white_mask, black_mask)
+    image = get_white_part(image)
     image = cv.cvtColor(image, cv.COLOR_BGR2GRAY)
     return image
 
@@ -94,9 +106,21 @@ def uniform_sample_points(boundary: np.array, num_points: int) -> np.ndarray:
     """
     Sample the boundary points.
     """
-    num_points = min(num_points, len(boundary))
-    indices = np.linspace(0, len(boundary) - 1, num_points, dtype=int)
-    return boundary[indices]
+    def get_fit_boundary_points(boundary_point:np.array, num_points:int):
+        fit_boundary_points = []
+        for i in range(num_points):
+            if i == num_points - 1:
+                fit_boundary_points.append(boundary_point[-1])
+                break
+            idx = int(i * len(boundary_point) / num_points)
+            fit_boundary_points.append(boundary_point[idx])
+        return np.array(fit_boundary_points)
+    if len(boundary) > num_points:
+        num_points = min(num_points, len(boundary))
+        indices = np.linspace(0, len(boundary) - 1, num_points, dtype=int)
+        return boundary[indices]
+    else:
+        return get_fit_boundary_points(boundary, num_points)
 
 
 def test_uniform_sample_num(
@@ -158,6 +182,7 @@ class Vertex:
         self.pre_vertex = pre_vertex
         self.succ_vertex = succ_vertex
         self.update_area()
+
 
 class Boundary_points:
     def __init__(self, boundary: np.ndarray) -> None:
