@@ -1102,7 +1102,7 @@ class IterWholeFirst_Con(nn.Module):
 
 
 class BaseFeatup(nn.Module):
-    def __init__(self):
+    def __init__(self, freeze_backbone=True):
         super(BaseFeatup, self).__init__()
         self.refine_num = 3
         self.boundary_num = 80
@@ -1114,8 +1114,9 @@ class BaseFeatup(nn.Module):
             use_norm=True,
         )
         # freeze backbone
-        for param in self.backbone.parameters():
-            param.requires_grad = False
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
         self.img_token_fc = nn.Sequential(
             nn.Linear(384, d_token),
             nn.LayerNorm(d_token),
@@ -1246,6 +1247,8 @@ class BaseDLV3(nn.Module):
             num_layers=1,
         )
         self.xy_offset_fc = nn.Sequential(
+            nn.Linear(d_token, d_token),
+            nn.ReLU(),
             nn.Linear(d_token, 2),
         )
 
