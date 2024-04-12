@@ -162,10 +162,10 @@ class TenVideoInfer:
                     cur_img, cur_bou, cur_sgm = test_set.get_item(name_idx, i)
                     with torch.no_grad():
                         results = model(
-                            pre_img.unsqueeze(0).to(device),
                             fir_img.unsqueeze(0).to(device),
-                            cur_img.unsqueeze(0).to(device),
                             fir_bou.unsqueeze(0).to(device),
+                            pre_img.unsqueeze(0).to(device),
+                            cur_img.unsqueeze(0).to(device),
                             pre_bou.unsqueeze(0).to(device),
                         )
                     pre_bou = results[-1].int().squeeze(0).clamp(0, 223)

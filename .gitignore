@@ -12,3 +12,9 @@ Output20375785.err
 Output20375782.out
 models
 draft.ipynb
+model
+log
+featup_10.err
+featup_10.out
+unet_10.err
+unet_10.out

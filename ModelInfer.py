@@ -101,6 +101,16 @@ class ModelInfer:
         plt.show()
         return total_iou / len(self.test_set)
     
+    def get_infer_iou(self, index: int):
+        total_iou = 0
+        for i in range(len(self.test_set)):
+            img, sgm, boundary = self.test_set[i]
+            total_iou += get_boundary_iou(
+                sgm, self.infer_results[index][i].cpu().numpy()
+            )
+        return total_iou / len(self.test_set)
+
+    
     def get_boundary(self, index: int):
         if len(self.infer_results) == 0:
             return self.test_set[index][2]
