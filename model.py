@@ -1202,6 +1202,121 @@ class BaseFeatup(nn.Module):
             results.append(cur_boundary)
         return results
 
+
+class FeatupOut_fir(nn.Module):
+    def __init__(self, freeze_backbone=True, refine_num=3):
+        super(FeatupOut_fir, self).__init__()
+        self.refine_num = refine_num
+        self.boundary_num = 80
+
+        d_token = 384 + 2
+        self.backbone = torch.hub.load(
+            "mhamilton723/FeatUp",
+            "dino16",
+            use_norm=True,
+        )
+        # freeze backbone
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+        self.img_token_fc = nn.Sequential(
+            nn.Linear(384, d_token),
+            nn.LayerNorm(d_token),
+        )
+        self.layernorm = nn.LayerNorm(d_token)
+        self.positional_embedding = PositionalEncoding(d_token)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_token,
+            nhead=1,
+            batch_first=True,
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=1,
+        )
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_token,
+            nhead=1,
+            batch_first=True,
+        )
+        self.transformer_decoder = nn.TransformerDecoder(
+            decoder_layer=decoder_layer,
+            num_layers=1,
+        )
+        self.xy_offset_fc = nn.Sequential(
+            nn.Linear(d_token, 2),
+        )
+
+    def forward(
+        self,
+        first_frame: torch.Tensor,
+        first_boundary: torch.Tensor,
+        previous_frame: torch.Tensor,
+        current_frame: torch.Tensor,
+        previous_boundary: torch.Tensor,
+    ) -> torch.Tensor:
+        best_shift = find_best_shift(previous_boundary, first_boundary)
+        for i in range(len(best_shift)):
+            first_boundary[i] = first_boundary[i].roll(best_shift[i], 0)
+
+        pre_raw_img_feats = self.backbone.model(previous_frame)
+        # first_raw_img_feats = self.backbone.model(first_frame)
+        cur_raw_img_feats = self.backbone.model(current_frame)
+
+        pre_img_tokens = get_img_tokens(pre_raw_img_feats)
+        cur_img_tokens = get_img_tokens(cur_raw_img_feats)
+        # first_img_tokens = get_img_tokens(first_raw_img_feats)
+
+        img_tokens = torch.cat(
+            [
+                pre_img_tokens,
+                cur_img_tokens,
+                # first_img_tokens,
+            ],
+            dim=1,
+        )
+        img_tokens = self.img_token_fc(img_tokens)
+        img_tokens = self.layernorm(img_tokens)
+        img_tokens = self.positional_embedding(img_tokens)
+        memory = self.transformer_encoder(img_tokens)
+
+        pre_img_features = self.backbone(previous_frame)
+        cur_img_features = self.backbone(current_frame)
+        # first_img_features = self.backbone(first_frame)
+
+        pre_bou_feats = get_bou_features(pre_img_features, previous_boundary)
+        # first_bou_feats = get_bou_features(first_img_features, first_boundary)
+        pre_bou_feats = pre_bou_feats.permute(0, 2, 1)
+        # first_bou_feats = first_bou_feats.permute(0, 2, 1)
+
+        # first_tokens = torch.cat([first_bou_feats, first_boundary.float(),], dim=2)
+        pre_tokens = torch.cat([pre_bou_feats, previous_boundary.float()], dim=2)
+
+        results = []
+        cur_boundary = previous_boundary.float()
+        for _ in range(self.refine_num):
+            cur_boundary = cur_boundary.clamp(min=0, max=223)
+            cur_bou_feats = get_bou_features(cur_img_features, cur_boundary.long())
+            cur_bou_feats = cur_bou_feats.permute(0, 2, 1)
+            cur_tokens = torch.cat([cur_bou_feats, cur_boundary], dim=2)
+            input_tokens = torch.cat(
+                [
+                    pre_tokens,
+                    cur_tokens,
+                    # first_tokens,
+                ],
+                dim=1,
+            )
+            input_tokens = self.layernorm(input_tokens)
+            input_tokens = self.positional_embedding(input_tokens)
+            output_tokens = self.transformer_decoder(input_tokens, memory)
+            bou_offset = output_tokens[:, self.boundary_num : 2 * self.boundary_num, :]
+            bou_offset = self.xy_offset_fc(bou_offset)
+            cur_boundary = cur_boundary + bou_offset
+            results.append(cur_boundary)
+        return results
+
+
 class Featup_without_global(nn.Module):
     def __init__(self):
         super(Featup_without_global, self).__init__()
@@ -1231,7 +1346,7 @@ class Featup_without_global(nn.Module):
         self.xy_offset_fc = nn.Sequential(
             nn.Linear(d_token, 2),
         )
-    
+
     def forward(
         self,
         first_frame: torch.Tensor,
@@ -1243,7 +1358,7 @@ class Featup_without_global(nn.Module):
         best_shift = find_best_shift(previous_boundary, first_boundary)
         for i in range(len(best_shift)):
             first_boundary[i] = first_boundary[i].roll(best_shift[i], 0)
-        
+
         pre_img_features = self.backbone(previous_frame)
         cur_img_features = self.backbone(current_frame)
         first_img_features = self.backbone(first_frame)
@@ -1273,14 +1388,159 @@ class Featup_without_global(nn.Module):
             results.append(cur_boundary)
         return results
 
+
+def get_neighbor_features(
+    img_features: torch.Tensor,
+    boundary: torch.Tensor,
+    scale_level: int,
+):
+    device = img_features.device
+    if scale_level > 0:
+        img_features = F.avg_pool2d(
+            img_features,
+            2**scale_level,
+            2**scale_level,
+        )
+        boundary = boundary // (2**scale_level)
+    img_features = F.pad(img_features, (1, 1, 1, 1), "constant", 0)
+    neighor_features = []
+    for x_offset in range(-1, 2):
+        for y_offset in range(-1, 2):
+            neighor_features.append(
+                get_bou_features(
+                    img_features,
+                    boundary + torch.tensor([x_offset, y_offset]).to(device),
+                )
+            )
+    return torch.cat(neighor_features, dim=2)
+
+
+class FeatupNei(nn.Module):
+    def __init__(self):
+        super(FeatupNei, self).__init__()
+        self.bou_num = 80
+        d_token = 384 + 2
+        self.scale_num = 4
+        self.refine_num = 3
+
+        self.backbone = torch.hub.load(
+            "mhamilton723/FeatUp",
+            "dino16",
+            use_norm=True,
+        )
+        # freeze the backbone
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+
+        self.neighor_fc = nn.Linear(384, d_token)
+        self.layer_norm = nn.LayerNorm(d_token)
+        self.position_enc = PositionalEncoding(d_token)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_token,
+            nhead=1,
+            batch_first=True,
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=1,
+        )
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_token,
+            nhead=1,
+            batch_first=True,
+        )
+        self.transformer_decoder = nn.TransformerDecoder(
+            decoder_layer,
+            num_layers=1,
+        )
+        self.xy_offset_fc = nn.Linear(d_token, 2)
+
+    def forward(
+        self,
+        fir_img: torch.Tensor,
+        fir_bou: torch.Tensor,
+        pre_img: torch.Tensor,
+        cur_img: torch.Tensor,
+        pre_bou: torch.Tensor,
+    ):
+        best_shift = find_best_shift(pre_bou, fir_bou)
+        for i in range(len(best_shift)):
+            fir_bou[i] = fir_bou[i].roll(best_shift[i], 0)
+
+        fir_img_feats = self.backbone(fir_img)
+        pre_img_feats = self.backbone(pre_img)
+        cur_img_feats = self.backbone(cur_img)
+
+        neigh_feats = []
+        for scale_level in range(self.scale_num):
+            neigh_feats.append(
+                get_neighbor_features(
+                    cur_img_feats,
+                    pre_bou,
+                    scale_level,
+                ).permute(0, 2, 1)
+            )
+        neigh_tokens = []
+        for scale_level in range(self.scale_num):
+            neigh_tokens.append(
+                self.neighor_fc(
+                    neigh_feats[scale_level],
+                ),
+            )
+        for scale_level in range(self.scale_num):
+            neigh_tokens[scale_level] = self.position_enc(
+                self.layer_norm(
+                    neigh_tokens[scale_level],
+                ),
+            )
+        memorys = []
+        for scale_level in range(self.scale_num):
+            memorys.append(
+                self.transformer_encoder(
+                    neigh_tokens[scale_level],
+                ),
+            )
+
+        pre_bou_feats = get_bou_features(pre_img_feats, pre_bou)
+        fir_bou_feats = get_bou_features(fir_img_feats, fir_bou)
+        fir_bou_feats = fir_bou_feats.permute(0, 2, 1)
+        pre_bou_feats = pre_bou_feats.permute(0, 2, 1)
+        fir_tokens = torch.cat([fir_bou_feats, fir_bou.float()], dim=2)
+        pre_tokens = torch.cat([pre_bou_feats, pre_bou.float()], dim=2)
+
+        results = []
+        cur_bou = pre_bou.float()
+        for _ in range(self.refine_num):
+            cur_bou = cur_bou.clamp(min=0, max=223)
+            cur_bou_feats = get_bou_features(cur_img_feats, cur_bou.long())
+            cur_bou_feats = cur_bou_feats.permute(0, 2, 1)
+            cur_tokens = torch.cat([cur_bou_feats, cur_bou], dim=2)
+            input_tokens = torch.cat([pre_tokens, cur_tokens, fir_tokens], dim=1)
+            input_tokens = self.layer_norm(input_tokens)
+            input_tokens = self.position_enc(input_tokens)
+            for scale_level in reversed(range(self.scale_num)):
+                input_tokens = self.transformer_decoder(
+                    input_tokens,
+                    memorys[scale_level],
+                )
+            out_tokens = input_tokens[:, self.bou_num : 2 * self.bou_num, :]
+            xy_offset = self.xy_offset_fc(out_tokens)
+            cur_bou = xy_offset + pre_bou.float()
+            results.append(cur_bou)
+        return results
+
+
 class DLV3_backbone(nn.Module):
     def __init__(self):
         super(DLV3_backbone, self).__init__()
-        self.backbone = torch.hub.load('pytorch/vision:v0.10.0', 'deeplabv3_resnet50', pretrained=True)
+        self.backbone = torch.hub.load(
+            "pytorch/vision:v0.10.0", "deeplabv3_resnet50", pretrained=True
+        )
         self.backbone.classifier = nn.Identity()
-    
+
     def forward(self, x):
         return self.backbone(x)["out"]
+
 
 class BaseDLV3(nn.Module):
     def __init__(self):

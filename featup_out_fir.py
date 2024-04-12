@@ -1,6 +1,6 @@
 from dataloader import DAVIS_Seq2, normalize_image, BallDataset, Balltest
 from ModelInfer import ModelInfer
-from model import Featup_without_global
+from model import FeatupOut_fir
 from torch.utils.data import DataLoader
 import torch
 import torch.nn as nn
@@ -18,11 +18,7 @@ import time
 import logging
 
 
-coutinue_train = True
-coutinue_epoch = 755
-continue_interval = 5
-continue_inter_num = 50
-model_name = "featup_out_global"
+model_name = "featup_out_fir"
 log_path = f"./log/{model_name}.log"
 logging.basicConfig(
     filename=log_path,
@@ -39,7 +35,7 @@ testset = Balltest("ellipse/uniform_samples_80.json")
 model_infer = ModelInfer(testset)
 
 # Load the model
-model = Featup_without_global().cuda()
+model = FeatupOut_fir().cuda()
 
 # Load the optimizer
 optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-3)
@@ -49,16 +45,6 @@ dict_iou = {}
 interval_epochs = 50
 inter_num = 155
 epoch_index = 0
-
-if coutinue_train:
-    model.load_state_dict(torch.load(f"./model/{model_name}.pth"))
-    with open(f"./log/{model_name}_loss.json", "r") as f:
-        dict_loss = json.load(f)
-    with open(f"./log/{model_name}_iou.json", "r") as f:
-        dict_iou = json.load(f)
-    epoch_index = coutinue_epoch
-    interval_epochs = continue_interval
-    inter_num = continue_inter_num
 
 for interval in range(inter_num):
     for e in range(interval_epochs):
