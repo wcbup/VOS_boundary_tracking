@@ -18,11 +18,7 @@ import time
 import logging
 
 
-coutinue_train = True
-coutinue_epoch = 1496
-continue_interval = 20
-continue_inter_num = 100
-model_name = "featupNei"
+model_name = "featupNei_nor"
 log_path = f"./log/{model_name}.log"
 logging.basicConfig(
     filename=log_path,
@@ -46,19 +42,9 @@ optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-3)
 
 dict_loss = {}
 dict_iou = {}
-interval_epochs = 500
+interval_epochs = 50
 inter_num = 155
 epoch_index = 0
-
-if coutinue_train:
-    model.load_state_dict(torch.load(f"./model/{model_name}.pth"))
-    with open(f"./log/{model_name}_loss.json", "r") as f:
-        dict_loss = json.load(f)
-    with open(f"./log/{model_name}_iou.json", "r") as f:
-        dict_iou = json.load(f)
-    epoch_index = coutinue_epoch
-    interval_epochs = continue_interval
-    inter_num = continue_inter_num
 
 for interval in range(inter_num):
     for e in range(interval_epochs):
@@ -113,7 +99,5 @@ for interval in range(inter_num):
         json.dump(dict_iou, f)
     if interval_epochs > 100:
         interval_epochs = 50
-    # elif interval_epochs > 5:
-    #     interval_epochs -= 5
-    elif interval_epochs > 20:
-        interval_epochs -= 10
+    elif interval_epochs > 5:
+        interval_epochs -= 5

@@ -1471,42 +1471,46 @@ class FeatupNei(nn.Module):
         pre_img_feats = self.backbone(pre_img)
         cur_img_feats = self.backbone(cur_img)
 
-        neigh_feats = []
-        for scale_level in range(self.scale_num):
-            neigh_feats.append(
-                get_neighbor_features(
-                    cur_img_feats,
-                    pre_bou,
-                    scale_level,
-                ).permute(0, 2, 1)
-            )
-        neigh_tokens = []
-        for scale_level in range(self.scale_num):
-            neigh_tokens.append(
-                self.neighor_fc(
-                    neigh_feats[scale_level],
-                ),
-            )
-        for scale_level in range(self.scale_num):
-            neigh_tokens[scale_level] = self.position_enc(
-                self.layer_norm(
-                    neigh_tokens[scale_level],
-                ),
-            )
-        memorys = []
-        for scale_level in range(self.scale_num):
-            memorys.append(
-                self.transformer_encoder(
-                    neigh_tokens[scale_level],
-                ),
-            )
-
         pre_bou_feats = get_bou_features(pre_img_feats, pre_bou)
         fir_bou_feats = get_bou_features(fir_img_feats, fir_bou)
         fir_bou_feats = fir_bou_feats.permute(0, 2, 1)
         pre_bou_feats = pre_bou_feats.permute(0, 2, 1)
         fir_tokens = torch.cat([fir_bou_feats, fir_bou.float()], dim=2)
         pre_tokens = torch.cat([pre_bou_feats, pre_bou.float()], dim=2)
+
+        def get_memorys(
+            cur_bou: torch.Tensor,
+        ) -> list[torch.Tensor]:
+            neigh_feats = []
+            for scale_level in range(self.scale_num):
+                neigh_feats.append(
+                    get_neighbor_features(
+                        cur_img_feats,
+                        cur_bou.long(),
+                        scale_level,
+                    ).permute(0, 2, 1)
+                )
+            neigh_tokens = []
+            for scale_level in range(self.scale_num):
+                neigh_tokens.append(
+                    self.neighor_fc(
+                        neigh_feats[scale_level],
+                    ),
+                )
+            for scale_level in range(self.scale_num):
+                neigh_tokens[scale_level] = self.position_enc(
+                    self.layer_norm(
+                        neigh_tokens[scale_level],
+                    ),
+                )
+            memorys = []
+            for scale_level in range(self.scale_num):
+                memorys.append(
+                    self.transformer_encoder(
+                        neigh_tokens[scale_level],
+                    ),
+                )
+            return memorys
 
         results = []
         cur_bou = pre_bou.float()
@@ -1518,6 +1522,7 @@ class FeatupNei(nn.Module):
             input_tokens = torch.cat([pre_tokens, cur_tokens, fir_tokens], dim=1)
             input_tokens = self.layer_norm(input_tokens)
             input_tokens = self.position_enc(input_tokens)
+            memorys = get_memorys(cur_bou)
             for scale_level in reversed(range(self.scale_num)):
                 input_tokens = self.transformer_decoder(
                     input_tokens,
