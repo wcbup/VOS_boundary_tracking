@@ -60,7 +60,13 @@ class DAVIS_Seq2(torch.utils.data.Dataset):
 
 
 class BallDataset(Dataset):
-    def __init__(self, json_path="./ball/uniform_samples_80.json", is_previous=True, output_first=False, transform=None):
+    def __init__(
+        self,
+        json_path="./ball/uniform_samples_80.json",
+        is_previous=True,
+        output_first=False,
+        transform=None,
+    ):
         self.json_path = json_path
         self.is_previous = is_previous
         if transform is None:
@@ -87,7 +93,6 @@ class BallDataset(Dataset):
         else:
             for i in range(len(tmp_data) - 1):
                 self.data.append((tmp_data[0], tmp_data[i + 1]))
-
 
     def __len__(self):
         return len(self.data)
@@ -116,7 +121,14 @@ class BallDataset(Dataset):
         else:
             pre_idx = 1
             curr_idx = 0
-        output = (frame1_img, frame2_img, frame1_boundary, frame2_boundary, pre_idx, curr_idx)
+        output = (
+            frame1_img,
+            frame2_img,
+            frame1_boundary,
+            frame2_boundary,
+            pre_idx,
+            curr_idx,
+        )
         if self.output_first:
             first_img = Image.open(self.first_data[0]).convert("RGB")
             first_img = self.transform(first_img)
@@ -155,7 +167,7 @@ class Balltest(torch.utils.data.Dataset):
 
 
 class DAVIS_test(torch.utils.data.Dataset):
-    def __init__(self, video_name: str, is_uniform=True):
+    def __init__(self, video_name: str = "bear", is_uniform=True):
         self.transform = transforms.Compose(
             [
                 transforms.Resize((224, 224)),
@@ -185,3 +197,57 @@ class DAVIS_test(torch.utils.data.Dataset):
         boundary = np.array(boundary).astype(np.int32)
         boundary = torch.tensor(boundary).int()
         return img, sgm, boundary
+
+
+class OneVideoDataset(Dataset):
+    def __init__(self, video_name="bear"):
+        with open("./uniform_samples_80.json", "r") as f:
+            total_data: dict[str, list[tuple[str, str, list]]] = json.loads(f.read())
+        self.raw_data = total_data[video_name]
+        self.transform = transforms.Compose(
+            [
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ]
+        )
+        self.data = []
+        for i in range(len(self.raw_data) - 1):
+            self.data.append(
+                (
+                    self.raw_data[0],
+                    self.raw_data[i],
+                    self.raw_data[i + 1],
+                    i,
+                    i + 1,
+                )
+            )
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        fir_frame, pre_frame, cur_frame, pre_idx, cur_idx = self.data[idx]
+        fir_img = Image.open(fir_frame[0]).convert("RGB")
+        pre_img = Image.open(pre_frame[0]).convert("RGB")
+        cur_img = Image.open(cur_frame[0]).convert("RGB")
+        fir_img = self.transform(fir_img)
+        pre_img = self.transform(pre_img)
+        cur_img = self.transform(cur_img)
+
+        fir_bou = np.array(fir_frame[2]).astype(np.int32)
+        pre_bou = np.array(pre_frame[2]).astype(np.int32)
+        cur_bou = np.array(cur_frame[2]).astype(np.int32)
+
+        return (
+            fir_img,
+            fir_bou,
+            pre_img,
+            cur_img,
+            pre_bou,
+            cur_bou,
+            pre_idx,
+            cur_idx,
+        )

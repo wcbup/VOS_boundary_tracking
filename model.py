@@ -5,6 +5,10 @@ from torchvision.models import resnet50, ResNet50_Weights
 from torchsummary import summary
 import numpy as np
 from einops import rearrange
+from torchvision.models.detection import (
+    fasterrcnn_resnet50_fpn_v2,
+    FasterRCNN_ResNet50_FPN_V2_Weights,
+)
 
 
 class PositionalEncoding(nn.Module):
@@ -1284,6 +1288,123 @@ class AddCoords(nn.Module):
         return input_tensor
 
 
+class ConvFiler(nn.Module):
+    def __init__(self, in_channel: int, out_channel: int) -> None:
+        super(ConvFiler, self).__init__()
+        self.conv = nn.Conv2d(
+            in_channel,
+            out_channel,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        )
+        self.bn = nn.BatchNorm2d(out_channel)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.bn(x)
+        x = self.relu(x)
+        return x
+
+
+class Res50Encoder(nn.Module):
+    def __init__(
+        self,
+    ) -> None:
+        super(Res50Encoder, self).__init__()
+
+        def modify_resblock(resblock: nn.Sequential, dilation: int) -> nn.Sequential:
+            for i, layer in enumerate(resblock):
+                if i == 0:
+                    layer.conv2.stride = (1, 1)
+                    layer.downsample[0].stride = (1, 1)
+                layer.conv2.dilation = (dilation, dilation)
+                layer.conv2.padding = (dilation, dilation)
+            return resblock
+
+        res50 = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+        self.model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+        self.model = nn.Sequential(*list(self.model.children())[:-3])
+        self.conv1 = res50.conv1
+        self.bn1 = res50.bn1
+        self.relu = res50.relu
+        self.maxpool = res50.maxpool
+        self.filter0 = ConvFiler(64, 64)
+        self.layer1 = res50.layer1
+        self.filter1 = ConvFiler(256, 64)
+        self.layer2 = modify_resblock(res50.layer2, 2)
+        self.filter2 = ConvFiler(512, 64)
+        self.layer3 = modify_resblock(res50.layer3, 4)
+        self.filter3 = ConvFiler(1024, 64)
+        self.layer4 = modify_resblock(res50.layer4, 8)
+        self.filter4 = ConvFiler(2048, 64)
+
+    def forward(self, x: torch.Tensor):
+        feat0 = self.conv1(x)
+        feat0 = self.bn1(feat0)
+        feat0 = self.relu(feat0)
+        featout0 = self.filter0(feat0)
+        feat1 = self.maxpool(feat0)
+        feat1 = self.layer1(feat1)
+        featout1 = self.filter1(feat1)
+        feat2 = self.layer2(feat1)
+        featout2 = self.filter2(feat2)
+        feat3 = self.layer3(feat2)
+        featout3 = self.filter3(feat3)
+        feat4 = self.layer4(feat3)
+        featout4 = self.filter4(feat4)
+        featout0 = F.interpolate(
+            featout0,
+            size=(224, 224),
+            mode="bilinear",
+        )
+        featout1 = F.interpolate(
+            featout1,
+            size=(224, 224),
+            mode="bilinear",
+        )
+        featout2 = F.interpolate(
+            featout2,
+            size=(224, 224),
+            mode="bilinear",
+        )
+        featout3 = F.interpolate(
+            featout3,
+            size=(224, 224),
+            mode="bilinear",
+        )
+        featout4 = F.interpolate(
+            featout4,
+            size=(224, 224),
+            mode="bilinear",
+        )
+        return torch.cat([featout0, featout1, featout2, featout3, featout4], dim=1)
+
+
+class ResFPNEncoder(nn.Module):
+    def __init__(
+        self,
+    ):
+        super(ResFPNEncoder, self).__init__()
+        self.backbone = fasterrcnn_resnet50_fpn_v2(
+            weights=FasterRCNN_ResNet50_FPN_V2_Weights
+        ).backbone
+        self.model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+        self.model = nn.Sequential(*list(self.model.children())[:-3])
+
+    def forward(self, x):
+        results = self.backbone(x)
+        features = [results[key] for key in ["0", "1", "2", "3", "pool"]]
+        for i in range(0, len(features)):
+            features[i] = F.interpolate(
+                features[i],
+                size=(224, 224),
+                mode="bilinear",
+            )
+        return torch.cat(features, dim=1)
+
+
 class CoordConv(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
         super(CoordConv, self).__init__()
@@ -1302,6 +1423,159 @@ def normalize_coord(x: torch.Tensor) -> torch.Tensor:
     x = x.float() / 223.0
     x = x * 2 - 1
     return x
+
+
+class GeneralExtra(nn.Module):
+    def __init__(
+        self,
+        extra_encoder: nn.Module = None,
+        d_token: int = 384 + 2,
+        normalize_coord: bool = False,
+        encoder: str = "featup",
+    ) -> None:
+        super(GeneralExtra, self).__init__()
+        self.refine_num = 3
+        self.boundary_num = 80
+        self.normalize_coord = normalize_coord
+
+        if encoder == "featup":
+            self.backbone = torch.hub.load(
+                "mhamilton723/FeatUp",
+                "dino16",
+                use_norm=True,
+            )
+            d_token = 384 + 2
+            img_feat_dim = 384
+        elif encoder == "res50":
+            self.backbone = Res50Encoder()
+            d_token = 320 + 2
+            img_feat_dim = 1024
+        elif encoder == "resfpn":
+            self.backbone = ResFPNEncoder()
+            d_token = 1280 + 2
+            img_feat_dim = 1024
+        else:
+            raise ValueError("Unknown encoder type")
+
+        # freeze backbone
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+        self.raw_bone = self.backbone.model
+        if extra_encoder is not None:
+            self.backbone = nn.Sequential(
+                self.backbone,
+                extra_encoder,
+            )
+        self.img_token_fc = nn.Sequential(
+            nn.Linear(img_feat_dim, d_token),
+            nn.LayerNorm(d_token),
+        )
+        self.layernorm = nn.LayerNorm(d_token)
+        self.positional_embedding = PositionalEncoding(d_token)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_token,
+            nhead=1,
+            batch_first=True,
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=1,
+        )
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_token,
+            nhead=1,
+            batch_first=True,
+        )
+        self.transformer_decoder = nn.TransformerDecoder(
+            decoder_layer=decoder_layer,
+            num_layers=1,
+        )
+        self.xy_offset_fc = nn.Sequential(
+            nn.Linear(d_token, 2),
+        )
+
+    def forward(
+        self,
+        fir_img: torch.Tensor,
+        fir_bou: torch.Tensor,
+        pre_img: torch.Tensor,
+        cur_img: torch.Tensor,
+        pre_bou: torch.Tensor,
+    ) -> torch.Tensor:
+        best_shift = find_best_shift(pre_bou, fir_bou)
+        for i in range(len(best_shift)):
+            fir_bou[i] = fir_bou[i].roll(best_shift[i], 0)
+
+        fir_raw_img_feats = self.raw_bone(fir_img)
+        pre_raw_img_feats = self.raw_bone(pre_img)
+        cur_raw_img_feats = self.raw_bone(cur_img)
+
+        fir_img_tokens = get_img_tokens(fir_raw_img_feats)
+        pre_img_tokens = get_img_tokens(pre_raw_img_feats)
+        cur_img_tokens = get_img_tokens(cur_raw_img_feats)
+
+        img_tokens = torch.cat(
+            [pre_img_tokens, cur_img_tokens, fir_img_tokens],
+            dim=1,
+        )
+        img_tokens = self.img_token_fc(img_tokens)
+        img_tokens = self.layernorm(img_tokens)
+        img_tokens = self.positional_embedding(img_tokens)
+        memory = self.transformer_encoder(img_tokens)
+
+        pre_img_features = self.backbone(pre_img)
+        cur_img_features = self.backbone(cur_img)
+        fir_img_features = self.backbone(fir_img)
+
+        pre_bou_feats = get_bou_features(pre_img_features, pre_bou)
+        fir_bou_feats = get_bou_features(fir_img_features, fir_bou)
+        pre_bou_feats = pre_bou_feats.permute(0, 2, 1)
+        fir_bou_feats = fir_bou_feats.permute(0, 2, 1)
+
+        if self.normalize_coord:
+            fir_tokens = torch.cat(
+                [
+                    fir_bou_feats,
+                    normalize_coord(fir_bou.float()),
+                ],
+                dim=2,
+            )
+            pre_tokens = torch.cat(
+                [
+                    pre_bou_feats,
+                    normalize_coord(pre_bou.float()),
+                ],
+                dim=2,
+            )
+        else:
+            fir_tokens = torch.cat([fir_bou_feats, fir_bou.float()], dim=2)
+            pre_tokens = torch.cat([pre_bou_feats, pre_bou.float()], dim=2)
+
+        results = []
+        cur_boundary = pre_bou.float()
+        for _ in range(self.refine_num):
+            cur_boundary = cur_boundary.clamp(min=0, max=223)
+            cur_bou_feats = get_bou_features(cur_img_features, cur_boundary.long())
+            cur_bou_feats = cur_bou_feats.permute(0, 2, 1)
+            if self.normalize_coord:
+                cur_tokens = torch.cat(
+                    [
+                        cur_bou_feats,
+                        normalize_coord(cur_boundary.float()),
+                    ],
+                    dim=2,
+                )
+            else:
+                cur_tokens = torch.cat([cur_bou_feats, cur_boundary], dim=2)
+            input_tokens = torch.cat([pre_tokens, cur_tokens, fir_tokens], dim=1)
+            input_tokens = self.layernorm(input_tokens)
+            input_tokens = self.positional_embedding(input_tokens)
+            output_tokens = self.transformer_decoder(input_tokens, memory)
+            bou_offset = output_tokens[:, self.boundary_num : 2 * self.boundary_num, :]
+            bou_offset = self.xy_offset_fc(bou_offset)
+            cur_boundary = cur_boundary + bou_offset
+            results.append(cur_boundary)
+        return results
 
 
 class FeatupExtra(nn.Module):

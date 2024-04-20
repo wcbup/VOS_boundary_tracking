@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from preprocess_utensils import get_boundary_iou
 from dataloader import normalize_image
 
+
 class ModelInfer:
     def __init__(
         self,
@@ -13,9 +14,10 @@ class ModelInfer:
         self.test_set = test_set
         self.device = device
         self.infer_results = {}
-    
+
     def infer_model(self, model: torch.nn.Module):
         model = model.to(self.device)
+
         def inference_model_at_index(
             model: torch.nn.Module,
             test_dataset: torch.utils.data.Dataset,
@@ -64,7 +66,6 @@ class ModelInfer:
                 # plt.title(f"Frame {i}")
             return inference_results
 
-
         def inference_model(
             model: torch.nn.Module,
             test_dataset: torch.utils.data.Dataset,
@@ -72,20 +73,28 @@ class ModelInfer:
         ):
             inference_results = {}
             for i in range(len(test_dataset)):
-                tmp_result1 = inference_model_at_index(model, test_dataset, i, 0, device)
+                tmp_result1 = inference_model_at_index(
+                    model, test_dataset, i, 0, device
+                )
                 tmp_result2 = inference_model_at_index(
                     model, test_dataset, i, len(test_dataset) - 1, device
                 )
                 inference_results[i] = {**tmp_result1, **tmp_result2}
-            return inference_results        
-        
+            return inference_results
+
         self.infer_results = inference_model(model, self.test_set, self.device)
 
-    def show_infer_result(self, index: int):
+    def show_infer_result(
+        self,
+        index: int,
+        figsize=(10, 20),
+        nrows=10,
+        ncols=4,
+    ):
         total_iou = 0
-        plt.figure(figsize=(10, 20))
+        plt.figure(figsize=figsize)
         for i in range(len(self.test_set)):
-            plt.subplot(10, 4, i + 1)
+            plt.subplot(nrows, ncols, i + 1)
             img, sgm, boundary = self.test_set[i]
             plt.imshow(normalize_image(img.permute(1, 2, 0)))
             plt.plot(
@@ -100,7 +109,7 @@ class ModelInfer:
             )
         plt.show()
         return total_iou / len(self.test_set)
-    
+
     def get_infer_iou(self, index: int):
         total_iou = 0
         for i in range(len(self.test_set)):
@@ -110,7 +119,6 @@ class ModelInfer:
             )
         return total_iou / len(self.test_set)
 
-    
     def get_boundary(self, index: int):
         if len(self.infer_results) == 0:
             return self.test_set[index][2]
