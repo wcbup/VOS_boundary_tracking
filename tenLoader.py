@@ -10,8 +10,10 @@ from preprocess_utensils import get_gray_image, get_boundary_iou
 import random
 from torch.utils.data import DataLoader
 
+
 def normalize(x: torch.Tensor) -> torch.Tensor:
     return (x - x.min()) / (x.max() - x.min())
+
 
 class TenVideoTest:
     def __init__(self, json_path="./10video/train/total_data.json") -> None:
@@ -125,17 +127,20 @@ class TenVideoInfer:
         self.device = device
         self.infer_results = {}
 
-    def infer_model(self, model: torch.nn.Module):
+    def infer_at_video(
+        self,
+        model: torch.nn.Module,
+        video_idx: int,
+        infer_num: int = 20,
+    ):
         def infer_whole_at_index(
             model: torch.nn.Module,
-            test_set: TenVideoTest,
             name_idx: int,
             frame_idx: int,
             device="cuda",
         ):
             def infer_at_index(
                 model: torch.nn.Module,
-                test_set: TenVideoTest,
                 name_idx: int,
                 start_idx: int,
                 end_idx: int,
@@ -148,7 +153,7 @@ class TenVideoInfer:
                     step = -1
                 else:
                     step = 1
-                fir_img, fir_bou, fir_sgm = test_set.get_item(name_idx, start_idx)
+                fir_img, fir_bou, fir_sgm = self.test_set.get_item(name_idx, start_idx)
                 infer_results[start_idx] = fir_bou
                 # plt.subplot(10, 4, start_idx + 1)
                 # plt.imshow(normalize(fir_img.permute(1, 2, 0)))
@@ -159,7 +164,7 @@ class TenVideoInfer:
                 pre_bou = fir_bou
                 pre_img = fir_img
                 for i in range(start_idx, end_idx + step, step):
-                    cur_img, cur_bou, cur_sgm = test_set.get_item(name_idx, i)
+                    cur_img, cur_bou, cur_sgm = self.test_set.get_item(name_idx, i)
                     with torch.no_grad():
                         results = model(
                             fir_img.unsqueeze(0).to(device),
@@ -181,33 +186,39 @@ class TenVideoInfer:
                     # plt.title(f"frame {i}")
                 return infer_results
 
-            result1 = infer_at_index(model, test_set, name_idx, frame_idx, 0, device)
-            result2 = infer_at_index(model, test_set, name_idx, frame_idx, 19, device)
+            result1 = infer_at_index(model, name_idx, frame_idx, 0, device)
+            result2 = infer_at_index(model, name_idx, frame_idx, 19, device)
             return {**result1, **result2}
 
-        def infer_at_video(
-            model: torch.nn.Module,
-            test_set: TenVideoTest,
-            name_idx: int,
-        ):
-            infer_results = {}
-            for i in range(20):
-                infer_results[i] = infer_whole_at_index(
-                    model, test_set, name_idx, i, self.device
-                )
-            return infer_results
+        infer_results = []
+        video_len = len(self.test_set.data_set[video_idx])
+        if infer_num >= len(self.test_set.data_set[video_idx]):
+            infer_range = range(video_len)
+        elif infer_num <= 0:
+            infer_range = [0]
+        else:
+            interval = video_len // infer_num
+            random_start = random.randint(0, interval - 1)
+            infer_range = range(random_start, video_len, interval)
+        for i in infer_range:
+            infer_results.append(infer_whole_at_index(model, video_idx, i))
+        return infer_results
+
+    def infer_model(self, model: torch.nn.Module, infer_num: int = 20):
 
         for name_idx in range(len(self.test_set.video_names)):
-            self.infer_results[name_idx] = infer_at_video(
-                model, self.test_set, name_idx
+            self.infer_results[name_idx] = self.infer_at_video(
+                model,
+                name_idx,
+                infer_num,
             )
-    
+
     def get_iou(self, video_idx, frame_idx):
         infer_bou = self.infer_results[video_idx][0][frame_idx]
         _, _, sgm = self.test_set.get_item(video_idx, frame_idx)
-        iou  = get_boundary_iou(sgm, infer_bou.cpu().numpy())
+        iou = get_boundary_iou(sgm, infer_bou.cpu().numpy())
         return iou
-    
+
     def get_video_iou(self, video_idx):
         total_iou = 0
         for frame_idx in range(20):
@@ -219,20 +230,22 @@ class TenVideoInfer:
         for video_idx in range(len(self.test_set.video_names)):
             total_iou += self.get_video_iou(video_idx)
         return total_iou / len(self.test_set.video_names)
-    
+
     def show_infer_result(self, video_idx, start_frame_idx):
         plt.figure(figsize=(15, 20))
-        for frame_idx, boundary in self.infer_results[video_idx][start_frame_idx].items():
+        for frame_idx, boundary in self.infer_results[video_idx][
+            start_frame_idx
+        ].items():
             plt.subplot(5, 4, frame_idx + 1)
             img, _, _ = self.test_set.get_item(video_idx, frame_idx)
             plt.imshow(normalize(img.permute(1, 2, 0)))
             plt.plot(boundary[:, 0].cpu(), boundary[:, 1].cpu(), "r")
             plt.axis("off")
             plt.title(f"frame {frame_idx}")
-    
+
     def get_boundary(self, video_idx, frame_idx):
         if len(self.infer_results) == 0:
             return self.test_set.get_item(video_idx, frame_idx)[1]
         else:
-            random_index = random.randint(0, 19)
+            random_index = random.randint(0, len(self.infer_results[video_idx]) - 1)
             return self.infer_results[video_idx][random_index][frame_idx]

@@ -1,5 +1,5 @@
 from tenLoader import TenVideoDataset, normalize, TenVideoTest, TenVideoInfer
-from model import IterWholeFirst
+from model import FeatupExtra
 from torch.utils.data import DataLoader
 import torch
 import torch.nn as nn
@@ -17,7 +17,7 @@ import time
 import logging
 
 
-model_name = "unet_10"
+model_name = "featConv5_10"
 log_path = f"./log/{model_name}.log"
 logging.basicConfig(
     filename=log_path,
@@ -34,9 +34,25 @@ testset = TenVideoTest()
 model_infer = TenVideoInfer(testset)
 
 # Load the model
-model = IterWholeFirst(
-    add_xy_in_token=True,
-    use_unet=True,
+model = FeatupExtra(
+    nn.Sequential(
+        nn.Conv2d(
+            in_channels=384,
+            out_channels=384,
+            kernel_size=3,
+            padding=1,
+            stride=1,
+        ),
+        nn.ReLU(),
+        nn.Conv2d(
+            in_channels=384,
+            out_channels=384,
+            kernel_size=3,
+            padding=1,
+            stride=1,
+        ),
+        nn.ReLU(),
+    )
 ).cuda()
 
 # Load the optimizer
@@ -44,7 +60,7 @@ optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
 dict_loss = {}
 dict_iou = {}
-interval_epochs = 500
+interval_epochs = 50
 inter_num = 47
 epoch_index = 0
 
@@ -94,13 +110,11 @@ for interval in range(inter_num):
             f"./model/{model_name}.pth",
         )
         epoch_index += 1
-    model_infer.infer_model(model)
+    model_infer.infer_model(model, 5)
     total_iou = model_infer.get_total_iou()
     dict_iou[epoch_index] = total_iou
     logging.info(f"Epoch {epoch_index}: Total IOU {total_iou:.4f}")
     with open(f"./log/{model_name}_iou.json", "w") as f:
         json.dump(dict_iou, f)
-    if interval_epochs > 50:
-        interval_epochs = 50
     if interval_epochs > 20:
         interval_epochs -= 10

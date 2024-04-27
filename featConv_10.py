@@ -1,6 +1,5 @@
-from dataloader import DAVIS_Seq2, normalize_image, BallDataset, Balltest
-from ModelInfer import ModelInfer
-from model import Featup_without_global
+from tenLoader import TenVideoDataset, normalize, TenVideoTest, TenVideoInfer
+from model import FeatupExtra
 from torch.utils.data import DataLoader
 import torch
 import torch.nn as nn
@@ -18,11 +17,7 @@ import time
 import logging
 
 
-coutinue_train = True
-coutinue_epoch = 755
-continue_interval = 5
-continue_inter_num = 50
-model_name = "featup_out_global"
+model_name = "featConv_10"
 log_path = f"./log/{model_name}.log"
 logging.basicConfig(
     filename=log_path,
@@ -33,49 +28,59 @@ logging.basicConfig(
 logging.info(f"Start training {model_name}.")
 
 # Load the dataset
-train_dataset = BallDataset("ellipse/uniform_samples_80.json", output_first=True)
+train_dataset = TenVideoDataset()
 data_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, num_workers=4)
-testset = Balltest("ellipse/uniform_samples_80.json")
-model_infer = ModelInfer(testset)
+testset = TenVideoTest()
+model_infer = TenVideoInfer(testset)
 
 # Load the model
-model = Featup_without_global().cuda()
+model = FeatupExtra(
+    nn.Sequential(
+        nn.Conv2d(
+            in_channels=384,
+            out_channels=384,
+            kernel_size=3,
+            padding=1,
+            stride=1,
+        ),
+        nn.ReLU(),
+        nn.Conv2d(
+            in_channels=384,
+            out_channels=384,
+            kernel_size=3,
+            padding=1,
+            stride=1,
+        ),
+        nn.ReLU(),
+    )
+).cuda()
 
 # Load the optimizer
-optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-3)
+optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
 dict_loss = {}
 dict_iou = {}
 interval_epochs = 50
-inter_num = 155
+inter_num = 47
 epoch_index = 0
-
-if coutinue_train:
-    model.load_state_dict(torch.load(f"./model/{model_name}.pth"))
-    with open(f"./log/{model_name}_loss.json", "r") as f:
-        dict_loss = json.load(f)
-    with open(f"./log/{model_name}_iou.json", "r") as f:
-        dict_iou = json.load(f)
-    epoch_index = coutinue_epoch
-    interval_epochs = continue_interval
-    inter_num = continue_inter_num
 
 for interval in range(inter_num):
     for e in range(interval_epochs):
         model.train()
         mean_loss = 0
         for (
+            video_idx,
+            pre_idx,
             fir_img,
-            fir_bou,
             pre_img,
             cur_img,
+            fir_bou,
             pre_bou,
             cur_bou,
-            pre_idx,
-            cur_idx,
         ) in data_loader:
             pre_idx = pre_idx.item()
-            pre_bou = model_infer.get_boundary(pre_idx)
+            video_idx = video_idx.item()
+            pre_bou = model_infer.get_boundary(video_idx, pre_idx)
             pre_bou = pre_bou.unsqueeze(0).cuda()
             optimizer.zero_grad()
             results = model(
@@ -106,12 +111,10 @@ for interval in range(inter_num):
         )
         epoch_index += 1
     model_infer.infer_model(model)
-    total_iou = model_infer.get_infer_iou(0)
+    total_iou = model_infer.get_total_iou()
     dict_iou[epoch_index] = total_iou
     logging.info(f"Epoch {epoch_index}: Total IOU {total_iou:.4f}")
     with open(f"./log/{model_name}_iou.json", "w") as f:
         json.dump(dict_iou, f)
-    if interval_epochs > 100:
-        interval_epochs = 50
-    elif interval_epochs > 5:
-        interval_epochs -= 5
+    if interval_epochs > 20:
+        interval_epochs -= 10
