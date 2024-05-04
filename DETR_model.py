@@ -82,6 +82,8 @@ class DinoDETR(nn.Module):
             param.requires_grad = True
 
         self.con_to_img_conv = nn.Conv2d(4, 3, 1)
+        self.mem_img_fc = nn.Linear(384, 384)
+        self.cur_img_fc = nn.Linear(384, 384)
         self.hidden_dim = 384
         self.layernorm = nn.LayerNorm(self.hidden_dim).to(device)
         self.pos_enc = PositionalEncoding(self.hidden_dim).to(device)
@@ -146,27 +148,25 @@ class DinoDETR(nn.Module):
                 dim=1,
             ),
         )
-        # fir_con_feats = self.dino4(torch.cat([fir_img, fir_mask], dim=1))
-        # pre_con_feats = self.dino4(torch.cat([pre_img, pre_mask], dim=1))
         fir_con_feats = self.raw_dino(fir_con)
         pre_con_feats = self.raw_dino(pre_con)
         fir_con_tokens = get_img_tokens(fir_con_feats)
         pre_con_tokens = get_img_tokens(pre_con_feats)
         mem_img_tokens = torch.cat((fir_con_tokens, pre_con_tokens), dim=1)
-        mem_img_tokens = self.layernorm(mem_img_tokens)
-        mem_img_tokens = self.pos_enc(mem_img_tokens)
-        mem_img_tokens = self.transformer_encoder1(mem_img_tokens)
 
         cur_img_feats = self.raw_dino(cur_img)
         cur_img_tokens = get_img_tokens(cur_img_feats)
-        cur_img_tokens = self.layernorm(cur_img_tokens)
-        cur_img_tokens = self.pos_enc(cur_img_tokens)
-        cur_img_tokens = self.transformer_encoder2(cur_img_tokens)
+        
+        mem_img_tokens = self.mem_img_fc(mem_img_tokens)
+        cur_img_tokens = self.cur_img_fc(cur_img_tokens)
+        img_tokens = torch.cat((mem_img_tokens, cur_img_tokens), dim=1)
+        img_tokens = self.layernorm(img_tokens)
+        img_tokens = self.pos_enc(img_tokens)
+        img_tokens = self.transformer_encoder1(img_tokens)
 
         B, S, D = mem_img_tokens.shape
         queries = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1)
-        queries = self.transformer_decoder1(queries, mem_img_tokens)
-        # queries = self.transformer_decoder2(queries, cur_img_tokens)
+        queries = self.transformer_decoder1(queries, img_tokens)
 
         xy = self.xy_fc(queries).sigmoid() * 224
         return xy
