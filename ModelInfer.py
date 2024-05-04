@@ -3,17 +3,22 @@ import random
 import matplotlib.pyplot as plt
 from preprocess_utensils import get_boundary_iou
 from dataloader import normalize_image
+from polygon import SoftPolygon
 
 
 class ModelInfer:
     def __init__(
         self,
         test_set: torch.utils.data.Dataset,
+        is_detr=False,
         device="cuda",
     ) -> None:
         self.test_set = test_set
         self.device = device
         self.infer_results = {}
+        self.is_detr = is_detr
+        if is_detr:
+            self.solf_polygon = SoftPolygon(0.01, mode="hard_mask").to(device)
 
     def infer_model(self, model: torch.nn.Module):
         model = model.to(self.device)
@@ -45,14 +50,31 @@ class ModelInfer:
             # for i in tqdm(range(first_index, end_index + step, step)):
             for i in range(first_index, end_index + step, step):
                 curr_img, curr_sgm, curr_boundary = test_dataset[i]
-                results = model(
-                    first_img.unsqueeze(0).to(device),
-                    first_boundary.unsqueeze(0).to(device),
-                    pre_img.unsqueeze(0).to(device),
-                    curr_img.unsqueeze(0).to(device),
-                    pre_boundary.unsqueeze(0).to(device),
-                )
-                pre_boundary = results[-1].int().squeeze(0).clamp(0, 223)
+                if not self.is_detr:
+                    results = model(
+                        first_img.unsqueeze(0).to(device),
+                        first_boundary.unsqueeze(0).to(device),
+                        pre_img.unsqueeze(0).to(device),
+                        curr_img.unsqueeze(0).to(device),
+                        pre_boundary.unsqueeze(0).to(device),
+                    )
+                    pre_boundary = results[-1].int().squeeze(0).clamp(0, 223)
+                else:
+                    pre_sgm = self.solf_polygon(
+                        pre_boundary.unsqueeze(0).to(device).float(),
+                        224,
+                        224,
+                    )
+                    pre_sgm[pre_sgm == -1] = 0
+                    pre_sgm = pre_sgm.squeeze(0)
+                    output = model(
+                        first_img.unsqueeze(0).to(device),
+                        first_sgm.unsqueeze(0).to(device),
+                        pre_img.unsqueeze(0).to(device),
+                        pre_sgm.unsqueeze(0).to(device),
+                        curr_img.unsqueeze(0).to(device),
+                    )
+                    pre_boundary = output.int().squeeze(0).clamp(0, 223)
                 inference_results[i] = pre_boundary
                 pre_img = curr_img
                 # plt.subplot(10, 4, i + 1)
@@ -125,3 +147,16 @@ class ModelInfer:
         else:
             random_index = random.randint(0, len(self.infer_results) - 1)
             return self.infer_results[random_index][index]
+    
+    def get_segement(self, index: int):
+        if len(self.infer_results) == 0:
+            return self.test_set[index][1]
+        else:
+            boundary = self.get_boundary(index)
+            sgm = self.solf_polygon(
+                boundary.unsqueeze(0).to(self.device).float(),
+                224,
+                224,
+            )
+            sgm[sgm == -1] = 0
+            return sgm.squeeze(0)
