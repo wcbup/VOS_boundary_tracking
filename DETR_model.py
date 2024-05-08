@@ -69,17 +69,10 @@ def get_raw_dino(device="cuda") -> nn.Module:
 class DinoDETR(nn.Module):
     def __init__(self, boundary_num=80, device="cuda"):
         super(DinoDETR, self).__init__()
-        self.dino4 = get_dino4()
         self.raw_dino = get_raw_dino()
         # freeze raw_dino
         for param in self.raw_dino.parameters():
             param.requires_grad = False
-        # freeze dino4
-        for param in self.dino4.parameters():
-            param.requires_grad = False
-        # unfreeze the first proj of dino4
-        for param in self.dino4[0].model.patch_embed.proj.parameters():
-            param.requires_grad = True
 
         self.con_to_img_conv = nn.Conv2d(4, 3, 1)
         self.mem_img_fc = nn.Linear(384, 384)
@@ -92,7 +85,7 @@ class DinoDETR(nn.Module):
             self.boundary_num,
             self.hidden_dim,
         ).to(device)
-        self.transformer_encoder1 = nn.TransformerEncoder(
+        self.transformer_encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 d_model=self.hidden_dim,
                 nhead=1,
@@ -100,23 +93,7 @@ class DinoDETR(nn.Module):
             ),
             num_layers=1,
         )
-        self.transformer_decoder1 = nn.TransformerDecoder(
-            nn.TransformerDecoderLayer(
-                d_model=self.hidden_dim,
-                nhead=1,
-                batch_first=True,
-            ),
-            num_layers=1,
-        )
-        self.transformer_encoder2 = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=self.hidden_dim,
-                nhead=1,
-                batch_first=True,
-            ),
-            num_layers=1,
-        )
-        self.transformer_decoder2 = nn.TransformerDecoder(
+        self.transformer_decoder = nn.TransformerDecoder(
             nn.TransformerDecoderLayer(
                 d_model=self.hidden_dim,
                 nhead=1,
@@ -156,17 +133,17 @@ class DinoDETR(nn.Module):
 
         cur_img_feats = self.raw_dino(cur_img)
         cur_img_tokens = get_img_tokens(cur_img_feats)
-        
+
         mem_img_tokens = self.mem_img_fc(mem_img_tokens)
         cur_img_tokens = self.cur_img_fc(cur_img_tokens)
         img_tokens = torch.cat((mem_img_tokens, cur_img_tokens), dim=1)
         img_tokens = self.layernorm(img_tokens)
         img_tokens = self.pos_enc(img_tokens)
-        img_tokens = self.transformer_encoder1(img_tokens)
+        img_tokens = self.transformer_encoder(img_tokens)
 
         B, S, D = mem_img_tokens.shape
         queries = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1)
-        queries = self.transformer_decoder1(queries, img_tokens)
+        queries = self.transformer_decoder(queries, img_tokens)
 
         xy = self.xy_fc(queries).sigmoid() * 224
         return xy
