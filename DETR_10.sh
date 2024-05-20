@@ -3,7 +3,7 @@
 ### –- specify queue --
 #BSUB -q gpuv100
 ### -- set the job Name --
-#BSUB -J featConv_10
+#BSUB -J DETR_10
 ### -- ask for number of cores (default: 1) --
 #BSUB -n 4
 ### -- Select the resources: 1 gpu in exclusive process mode --
@@ -13,8 +13,8 @@
 #BSUB -B
 #BSUB -N
 #BSUB -u "s232248@dtu.dk"
-#BSUB -o log/featConv_10.out
-#BSUB -e log/featConv_10.err
+#BSUB -o log/DETR_10.out
+#BSUB -e log/DETR_10.err
 
 
 module load cuda/11.8
@@ -23,4 +23,4 @@ conda init bash
 source /work3/s232248/miniconda3/bin/activate
 conda activate ras
 
-python featConv_10.py
+python DETR_10.py

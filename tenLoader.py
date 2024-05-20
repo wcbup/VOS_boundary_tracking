@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from preprocess_utensils import get_gray_image, get_boundary_iou
 import random
 from torch.utils.data import DataLoader
+from polygon import SoftPolygon
 
 
 def normalize(x: torch.Tensor) -> torch.Tensor:
@@ -121,11 +122,92 @@ class TenVideoDataset(Dataset):
         )
 
 
+class TenRawset:
+    def __init__(self, train=True) -> None:
+        if train:
+            json_path = "./10video/train/total_data.json"
+        else:
+            json_path = "./10video/test/total_data.json"
+        with open(json_path, "r") as f:
+            self.raw_data = json.load(f)
+        self.video_names = list(self.raw_data.keys())
+        self.video_names.sort()
+        self.data_set = []
+        self.transform = transforms.Compose(
+            [
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ]
+        )
+        for video_name in self.video_names:
+            self.data_set.append([])
+            for data in self.raw_data[video_name]:
+                frame_path = data[0]
+                frame = Image.open(frame_path).convert("RGB")
+                frame = self.transform(frame)
+                boundary = data[1]
+                boundary = np.array(boundary).astype(np.int32)
+                boundary = torch.tensor(boundary)
+                sgm = get_gray_image(frame_path)
+                sgm[sgm > 0] = 1
+                sgm = torch.Tensor(sgm)
+                self.data_set[-1].append((frame, boundary, sgm))
+
+    def get_item(self, video_idx, frame_idx):
+        return self.data_set[video_idx][frame_idx]
+
+
+class TenDataset(Dataset):
+    def __init__(self, raw_set: TenRawset) -> None:
+        super().__init__()
+        self.raw_set = raw_set
+        self.data = []
+        for video_idx, video in enumerate(self.raw_set.data_set):
+            for frame_idx in range(len(video) - 1):
+                self.data.append(
+                    (
+                        video_idx,
+                        frame_idx,
+                        video[0],
+                        video[frame_idx],
+                        video[frame_idx + 1],
+                    )
+                )
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        video_idx, frame_idx, fir_frame, pre_frame, cur_frame = self.data[idx]
+        fir_img, fir_bou, fir_sgm = fir_frame
+        pre_img, pre_bou, pre_sgm = pre_frame
+        cur_img, cur_bou, cur_sgm = cur_frame
+        return (
+            video_idx,
+            frame_idx,
+            fir_img,
+            fir_bou,
+            fir_sgm,
+            pre_img,
+            pre_bou,
+            pre_sgm,
+            cur_img,
+            cur_bou,
+            cur_sgm,
+        )
+
+
 class TenVideoInfer:
-    def __init__(self, test_set: TenVideoTest, device="cuda") -> None:
+    def __init__(self, test_set: TenRawset, is_detr=False, device="cuda") -> None:
         self.test_set = test_set
         self.device = device
         self.infer_results = {}
+        self.is_detr = is_detr
+        if is_detr:
+            self.solf_polygon = SoftPolygon(0.01, mode="hard_mask").to(device)
 
     def infer_at_video(
         self,
@@ -165,15 +247,32 @@ class TenVideoInfer:
                 pre_img = fir_img
                 for i in range(start_idx, end_idx + step, step):
                     cur_img, cur_bou, cur_sgm = self.test_set.get_item(name_idx, i)
-                    with torch.no_grad():
-                        results = model(
-                            fir_img.unsqueeze(0).to(device),
-                            fir_bou.unsqueeze(0).to(device),
-                            pre_img.unsqueeze(0).to(device),
-                            cur_img.unsqueeze(0).to(device),
-                            pre_bou.unsqueeze(0).to(device),
+                    if not self.is_detr:
+                        with torch.no_grad():
+                            results = model(
+                                fir_img.unsqueeze(0).to(device),
+                                fir_bou.unsqueeze(0).to(device),
+                                pre_img.unsqueeze(0).to(device),
+                                cur_img.unsqueeze(0).to(device),
+                                pre_bou.unsqueeze(0).to(device),
+                            )
+                        pre_bou = results[-1].int().squeeze(0).clamp(0, 223)
+                    else:
+                        pre_sgm = self.solf_polygon(
+                            pre_bou.unsqueeze(0).to(device).float(),
+                            224,
+                            224,
                         )
-                    pre_bou = results[-1].int().squeeze(0).clamp(0, 223)
+                        pre_sgm[pre_sgm == -1] = 0
+                        pre_sgm = pre_sgm.squeeze(0)
+                        output = model(
+                            fir_img.unsqueeze(0).to(device),
+                            fir_sgm.unsqueeze(0).to(device),
+                            pre_img.unsqueeze(0).to(device),
+                            pre_sgm.unsqueeze(0).to(device),
+                            cur_img.unsqueeze(0).to(device),
+                        )
+                        pre_bou = output.int().squeeze(0).clamp(0, 223)
                     infer_results[i] = pre_bou
                     pre_img = cur_img
                     # plt.subplot(10, 4, i + 1)
@@ -206,6 +305,8 @@ class TenVideoInfer:
 
     def infer_model(self, model: torch.nn.Module, infer_num: int = 20):
 
+        self.infer_results = {}
+
         for name_idx in range(len(self.test_set.video_names)):
             self.infer_results[name_idx] = self.infer_at_video(
                 model,
@@ -221,9 +322,9 @@ class TenVideoInfer:
 
     def get_video_iou(self, video_idx):
         total_iou = 0
-        for frame_idx in range(20):
+        for frame_idx in range(len(self.test_set.data_set[video_idx])):
             total_iou += self.get_iou(video_idx, frame_idx)
-        return total_iou / 20
+        return total_iou / len(self.test_set.data_set[video_idx])
 
     def get_total_iou(self):
         total_iou = 0

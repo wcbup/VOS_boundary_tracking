@@ -15,6 +15,7 @@ from loss import order_loss, chamer_distance_loss
 import random
 import time
 import logging
+from polygon import RasLoss
 
 
 model_name = "featConv_10"
@@ -32,6 +33,8 @@ train_dataset = TenVideoDataset()
 data_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, num_workers=4)
 testset = TenVideoTest()
 model_infer = TenVideoInfer(testset)
+test_testset = TenVideoTest("./10video/test/total_data.json")
+test_model_infer = TenVideoInfer(test_testset)
 
 # Load the model
 model = FeatupExtra(
@@ -58,8 +61,13 @@ model = FeatupExtra(
 # Load the optimizer
 optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
+# load the loss function
+ras_loss = RasLoss().cuda()
+
 dict_loss = {}
 dict_iou = {}
+test_dict_iou = {}
+best_test_iou = 0
 interval_epochs = 50
 inter_num = 47
 epoch_index = 0
@@ -92,9 +100,12 @@ for interval in range(inter_num):
             )
             refine_num = len(results)
             loss = 0
+            cur_sgm = model_infer.test_set.get_item(video_idx, pre_idx + 1)[2]
+            cur_sgm[cur_sgm > 0] = 1
+            cur_sgm = torch.Tensor(cur_sgm).unsqueeze(0)
             for i in range(refine_num):
-                loss += 0.8 ** (refine_num - i - 1) * order_loss(
-                    results[i], cur_bou.cuda()
+                loss += 0.8 ** (refine_num - i - 1) * ras_loss(
+                    results[i], cur_sgm.cuda()
                 )
             loss.backward()
             optimizer.step()
@@ -111,10 +122,23 @@ for interval in range(inter_num):
         )
         epoch_index += 1
     model_infer.infer_model(model)
+    test_model_infer.infer_model(model, 0)
+    test_total_iou = test_model_infer.get_total_iou()
+    if test_total_iou > best_test_iou:
+        best_test_iou = test_total_iou
+        torch.save(
+            model.state_dict(),
+            f"./model/{model_name}_best.pth",
+        )
     total_iou = model_infer.get_total_iou()
     dict_iou[epoch_index] = total_iou
-    logging.info(f"Epoch {epoch_index}: Total IOU {total_iou:.4f}")
+    test_dict_iou[epoch_index] = test_total_iou
+    logging.info(
+        f"Epoch {epoch_index}: Train Total IOU {total_iou:.4f}, Test Total IOU {test_total_iou:.4f}"
+    )
     with open(f"./log/{model_name}_iou.json", "w") as f:
         json.dump(dict_iou, f)
+    with open(f"./log/{model_name}_test_iou.json", "w") as f:
+        json.dump(test_dict_iou, f)
     if interval_epochs > 20:
         interval_epochs -= 10

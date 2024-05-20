@@ -13,14 +13,14 @@
 #BSUB -B
 #BSUB -N
 #BSUB -u "s232248@dtu.dk"
-#BSUB -o featup_10.out
-#BSUB -e featup_10.err
+#BSUB -o log/featup_10.out
+#BSUB -e log/featup_10.err
 
 
 module load cuda/11.8
 
 conda init bash
 source /work3/s232248/miniconda3/bin/activate
-conda activate vos
+conda activate ras
 
 python featup_10.py

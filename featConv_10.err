@@ -5,3 +5,22 @@ Using cache found in /zhome/32/f/202284/.cache/torch/hub/facebookresearch_dino_m
   warnings.warn(f"enable_nested_tensor is True, but self.use_nested_tensor is False because {why_not_sparsity_fast_path}")
 /work3/s232248/miniconda3/envs/vos/lib/python3.12/site-packages/torch/functional.py:507: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at /opt/conda/conda-bld/pytorch_1708025824022/work/aten/src/ATen/native/TensorShape.cpp:3549.)
   return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
+Loaded module: cuda/11.8
+Using cache found in /zhome/32/f/202284/.cache/torch/hub/mhamilton723_FeatUp_main
+Using cache found in /zhome/32/f/202284/.cache/torch/hub/facebookresearch_dino_main
+/work3/s232248/miniconda3/envs/vos/lib/python3.12/site-packages/torch/nn/modules/transformer.py:286: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.self_attn.num_heads is odd
+  warnings.warn(f"enable_nested_tensor is True, but self.use_nested_tensor is False because {why_not_sparsity_fast_path}")
+/work3/s232248/miniconda3/envs/vos/lib/python3.12/site-packages/torch/functional.py:507: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at /opt/conda/conda-bld/pytorch_1708025824022/work/aten/src/ATen/native/TensorShape.cpp:3549.)
+  return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
+Traceback (most recent call last):
+  File "/zhome/32/f/202284/VOS_boundary_tracking/DAVIS/featConv_10.py", line 101, in <module>
+    results[i], cur_bou.cuda()
+                ^^^^^^^^^^^^^^
+KeyboardInterrupt
+Loaded module: cuda/11.8
+Traceback (most recent call last):
+  File "/zhome/32/f/202284/VOS_boundary_tracking/DAVIS/featConv_10.py", line 18, in <module>
+    from polygon import RasLoss
+  File "/zhome/32/f/202284/VOS_boundary_tracking/DAVIS/polygon.py", line 10, in <module>
+    import native_rasterizer
+ModuleNotFoundError: No module named 'native_rasterizer'
