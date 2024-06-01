@@ -6,10 +6,16 @@ from PIL import Image
 import torch
 from torchvision import transforms
 import matplotlib.pyplot as plt
-from preprocess_utensils import get_gray_image, get_boundary_iou
+from preprocess_utensils import (
+    get_gray_image,
+    get_boundary_iou,
+    get_boundary_points,
+    uniform_sample_points,
+)
 import random
 from torch.utils.data import DataLoader
 from polygon import SoftPolygon
+from randVideo import VideoRenderer
 
 
 def normalize(x: torch.Tensor) -> torch.Tensor:
@@ -160,10 +166,101 @@ class TenRawset:
         return self.data_set[video_idx][frame_idx]
 
 
+class RandRawset:
+    def __init__(self, model_name) -> None:
+        self.renderer = VideoRenderer(model_name)
+        self.data_set = []
+        self.transform = transforms.Compose(
+            [
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ]
+        )
+        self.reset()
+
+    def reset(self):
+        self.data_set = []
+        self.renderer.render_all_video()
+        self.video_names = list(self.renderer.video_path_dict.keys())
+        self.video_names.sort()
+        for video_name in self.video_names:
+            self.data_set.append([])
+            for frame_path in self.renderer.video_path_dict[video_name]:
+                frame = Image.open(frame_path).convert("RGB")
+                frame = self.transform(frame)
+                sgm = get_gray_image(frame_path)
+                boundary_points = get_boundary_points(sgm)
+                if boundary_points is None:
+                    boundary = torch.zeros((80, 2))
+                else:
+                    boundary = uniform_sample_points(boundary_points, 80)
+                    boundary = torch.tensor(boundary).int()
+                sgm[sgm > 0] = 1
+                sgm = torch.Tensor(sgm)
+                self.data_set[-1].append((frame, boundary, sgm))
+
+    def get_item(self, video_idx, frame_idx):
+        return self.data_set[video_idx][frame_idx]
+
+
+class OneHundredRawset:
+    def __init__(self) -> None:
+        with open("./tmp_videos/100Videos/video_path_dict.json", "r") as f:
+            self.video_path_dict = json.load(f)
+        self.video_names = list(self.video_path_dict.keys())
+        self.video_names.sort()
+        self.data_set = []
+        self.transform = transforms.Compose(
+            [
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ]
+        )
+        for video_name in self.video_names:
+            self.data_set.append([])
+            for frame_path in self.video_path_dict[video_name]:
+                frame = Image.open(frame_path).convert("RGB")
+                frame = self.transform(frame)
+                sgm = get_gray_image(frame_path)
+                boundary_points = get_boundary_points(sgm)
+                if boundary_points is None:
+                    boundary = torch.zeros((80, 2))
+                else:
+                    boundary = uniform_sample_points(boundary_points, 80)
+                    boundary = torch.tensor(boundary).int()
+                sgm[sgm > 0] = 1
+                sgm = torch.Tensor(sgm)
+                self.data_set[-1].append((frame, boundary, sgm))
+
+    def get_item(self, video_idx, frame_idx):
+        return self.data_set[video_idx][frame_idx]
+
+
 class TenDataset(Dataset):
-    def __init__(self, raw_set: TenRawset) -> None:
+    def __init__(self, raw_set: TenRawset | RandRawset) -> None:
         super().__init__()
         self.raw_set = raw_set
+        self.data = []
+        for video_idx, video in enumerate(self.raw_set.data_set):
+            for frame_idx in range(len(video) - 1):
+                self.data.append(
+                    (
+                        video_idx,
+                        frame_idx,
+                        video[0],
+                        video[frame_idx],
+                        video[frame_idx + 1],
+                    )
+                )
+
+    def reset(self):
+        self.raw_set.reset()
         self.data = []
         for video_idx, video in enumerate(self.raw_set.data_set):
             for frame_idx in range(len(video) - 1):

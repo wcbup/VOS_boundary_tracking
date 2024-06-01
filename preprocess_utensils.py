@@ -21,6 +21,8 @@ def get_boundary_iou(image: np.array, boundary: np.ndarray) -> float:
     mask = cv.fillPoly(mask, [boundary.astype(np.int32)], 1)
     intersection = np.logical_and(image, mask)
     union = np.logical_or(image, mask)
+    if union.sum() == 0:
+        return 1
     return intersection.sum() / union.sum()
 
 
