@@ -7,7 +7,6 @@ def get_edges(pred_bou: torch.Tensor) -> torch.Tensor:
     pred_edges = torch.sum(pred_bou_offset, dim=2)
     pred_edges = torch.abs(pred_edges)
     pred_edges = torch.sqrt(pred_edges)
-    pred_edges = torch.nan_to_num(pred_edges)
     return pred_edges
 
 
@@ -23,7 +22,6 @@ def deviation_loss(pred_bou: torch.Tensor, max_coord=224) -> torch.Tensor:
     )
     pred_edge_deviation = torch.abs(pred_edge_deviation)
     pred_edge_deviation = torch.sqrt(pred_edge_deviation)
-    pred_edge_deviation = torch.nan_to_num(pred_edge_deviation)
     return pred_edge_deviation.mean()
 
 def total_len_loss(pred_bou: torch.Tensor, max_coord=224) -> torch.Tensor:
