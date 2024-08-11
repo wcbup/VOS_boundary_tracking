@@ -15,19 +15,22 @@ import logging
 class BoundarySampler(nn.Module):
     def __init__(
         self,
+        init_boundary=None,
     ):
         super(BoundarySampler, self).__init__()
-        self.boundary_points = nn.Parameter(
-            torch.Tensor(
-                [
-                    [0.0, 0.0],
-                    [0.0, 224.0],
-                    [224.0, 224.0],
-                    [224.0, 0.0],
-                ]
+        if init_boundary is not None:
+            self.boundary_points = nn.Parameter(init_boundary)
+        else:
+            self.boundary_points = nn.Parameter(
+                torch.Tensor(
+                    [
+                        [0.0, 0.0],
+                        [0.0, 224.0],
+                        [224.0, 224.0],
+                        [224.0, 0.0],
+                    ]
+                )
             )
-        )
-        self.hard_polygon = SoftPolygon(0.01, mode="hard_mask")
 
     def forward(self):
         boundary = self.boundary_points
@@ -53,32 +56,68 @@ class BoundarySampler(nn.Module):
         boundary = self.forward().squeeze(0).cpu().detach().numpy()
         return boundary
 
-    def get_mask(self):
+    def get_mask(self, hard_polygon: nn.Module):
         boudary = self.forward()
-        mask = self.hard_polygon(boudary, 224, 224)
+        mask = hard_polygon(boudary, 224, 224)
         return mask.squeeze(0).cpu().detach().numpy()
 
+    def get_extreme_4_points(self):
+        boundary = self.forward().squeeze(0)
+        x_min = torch.min(boundary[:, 0])
+        x_max = torch.max(boundary[:, 0])
+        y_min = torch.min(boundary[:, 1])
+        y_max = torch.max(boundary[:, 1])
+        return torch.Tensor(
+            [
+                [x_min, y_min],
+                [x_min, y_max],
+                [x_max, y_max],
+                [x_max, y_min],
+            ],
+        ).to(boundary.device)
+
+def get_polygon_iou(
+    polygon: torch.Tensor,
+    mask: torch.Tensor,
+    hard_polygon: nn.Module,
+) -> float:
+    if mask.sum() == 0:
+        return 1
+    polygon_batch = polygon.unsqueeze(0)
+    mask_batch = mask.unsqueeze(0)
+    ras_mask = hard_polygon(
+        polygon_batch,
+        mask_batch.shape[1],
+        mask_batch.shape[2],
+    )
+    ras_mask = ras_mask.squeeze(0)
+    ras_mask[ras_mask == -1] = 0
+    interction = torch.sum(ras_mask * mask)
+    union = torch.sum(ras_mask) + torch.sum(mask) - interction
+    iou = interction / union
+    return iou.item()
 
 def sample_one_frame(
     mask: torch.Tensor,
     max_point_num: int,
     use_std_loss: bool,
     fir_epoch_multi: int,
-    epoch_num=100,
+    hard_polygon: nn.Module,
+    epoch_num: int,
+    ras_loss: nn.Module,
+    boundary_sampler: BoundarySampler,
 ) -> dict:
-    boundary_sampler = BoundarySampler().cuda()
-    ras_loss = RasLoss().cuda()
     results = {}
     mask_batch = mask.unsqueeze(0).cuda()
     current_point_num = boundary_sampler.boundary_points.shape[0]
+    if use_std_loss:
+        dif_weight = 0.5
+        std_weight = 0.5
+    else:
+        dif_weight = 1.0
+        std_weight = 0.0
     while current_point_num <= max_point_num:
-        optimizer = optim.Adam(boundary_sampler.parameters(), lr=1e-0)
-        if use_std_loss:
-            dif_weight = 0.5
-            std_weight = 0.5
-        else:
-            dif_weight = 1.0
-            std_weight = 0.0
+        optimizer = optim.Adam(boundary_sampler.parameters(), lr=1)
         if current_point_num == 4:
             tmp_epoch_num = epoch_num * fir_epoch_multi
         else:
@@ -94,8 +133,10 @@ def sample_one_frame(
                 total_loss = dif_weight * dif_loss + std_weight * std_loss
             total_loss.backward()
             optimizer.step()
-        iou = get_boundary_iou(
-            mask.cpu().detach().numpy(), boundary_sampler.get_numpy()
+        iou = get_polygon_iou(
+            boundary_sampler().squeeze(0),
+            mask_batch.squeeze(0),
+            hard_polygon,
         )
         current_result = {}
         current_result["boundary"] = boundary_sampler.get_numpy().tolist()
@@ -149,18 +190,59 @@ def sample_one_video(
     max_point_num: int,
     use_std_loss: bool,
     fir_epoch_multi: int,
-    epoch_num=100,
-) -> dict:
+    hard_polygon: nn.Module,
+    epoch_num: int,
+    ras_loss: nn.Module,
+    min_threshold: int,
+) -> list:
     results = []
-    for img, mask in video_data:
-        result = sample_one_frame(
-            mask,
-            max_point_num,
-            use_std_loss,
-            fir_epoch_multi,
-            epoch_num,
-        )
-        results.append(result)
+    boundary_sampler = BoundarySampler().cuda()
+    for frame_idx, (img, mask) in enumerate(video_data):
+        if mask.sum() < min_threshold:
+            tmp_fir_epoch_multi = fir_epoch_multi * 5
+        else:
+            tmp_fir_epoch_multi = fir_epoch_multi
+        if frame_idx == 0:
+            results.append(
+                sample_one_frame(
+                    mask=mask,
+                    max_point_num=max_point_num,
+                    use_std_loss=use_std_loss,
+                    fir_epoch_multi=tmp_fir_epoch_multi,
+                    hard_polygon=hard_polygon,
+                    epoch_num=epoch_num,
+                    ras_loss=ras_loss,
+                    boundary_sampler=boundary_sampler,
+                ),
+            )
+        else:
+            refine_result = sample_one_frame(
+                mask=mask,
+                max_point_num=max_point_num,
+                use_std_loss=use_std_loss,
+                fir_epoch_multi=1,
+                hard_polygon=hard_polygon,
+                epoch_num=epoch_num,
+                ras_loss=ras_loss,
+                boundary_sampler=boundary_sampler,
+            )
+            new_boundary_sampler = BoundarySampler().cuda()
+            new_result = sample_one_frame(
+                mask=mask,
+                max_point_num=max_point_num,
+                use_std_loss=use_std_loss,
+                fir_epoch_multi=tmp_fir_epoch_multi,
+                hard_polygon=hard_polygon,
+                epoch_num=epoch_num,
+                ras_loss=ras_loss,
+                boundary_sampler=new_boundary_sampler,
+            )
+            if refine_result[256]["iou"] > new_result[256]["iou"]:
+                results.append(refine_result)
+            else:
+                results.append(new_result)
+                boundary_sampler = new_boundary_sampler
+        boundary_sampler = BoundarySampler(boundary_sampler.get_extreme_4_points()).cuda()
     return results
 
 
@@ -171,9 +253,11 @@ def sample_save_dataset(
     max_point_num: int,
     use_std_loss: bool,
     fir_epoch_multi: int,
-    epoch_num:int,
+    epoch_num: int,
+    min_threshold: int,
 ):
-    log_path = f"./log/{save_title}_{start_idx}_{max_point_num}_{"std" if use_std_loss else ""}_{epoch_num}_{fir_epoch_multi}.log"
+    title = f"{save_title}_{start_idx}_{max_point_num}_{"std" if use_std_loss else ""}_{epoch_num}_{fir_epoch_multi}_{min_threshold}"
+    log_path = f"./log/{title}.log"
     logging.basicConfig(
         filename=log_path,
         level=logging.INFO,
@@ -181,17 +265,24 @@ def sample_save_dataset(
         datefmt="%Y-%m-%d %H:%M:%S",
         force=True,
     )
-    logging.info(f"Start sampling {save_title}_{start_idx}_{max_point_num}_{"std" if use_std_loss else ""}_{epoch_num}.")
-    save_path = f"{save_title}_{start_idx}_{max_point_num}_{"std" if use_std_loss else ""}_{epoch_num}_{fir_epoch_multi}.json"
+    logging.info(f"Start sampling {title}.")
+
+    save_path = f"./sample_results/{title}.json"
+
     results = []
     logging.info(f"video num: {len(video_dataset)}")
+    ras_loss = RasLoss().cuda()
+    hard_polygon = SoftPolygon(0.01, mode="hard_mask").cuda()
     for video_idx, video_data in enumerate(video_dataset):
         result = sample_one_video(
-            video_data,
-            max_point_num,
-            use_std_loss,
-            fir_epoch_multi,
-            epoch_num,
+            video_data=video_data,
+            max_point_num=max_point_num,
+            use_std_loss=use_std_loss,
+            fir_epoch_multi=fir_epoch_multi,
+            hard_polygon=hard_polygon,
+            epoch_num=epoch_num,
+            ras_loss=ras_loss,
+            min_threshold=min_threshold,
         )
         results.append(result)
         logging.info(f"video {video_idx} done")

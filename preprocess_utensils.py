@@ -92,7 +92,7 @@ def get_boundary_points(image: np.array) -> np.ndarray:
 
     # get max-area boundary
     max_area = 0
-    max_area_boundary = None
+    max_area_boundary = boundaries[0]
     for boundary in boundaries:
         if len(boundary) < 3:
             continue
