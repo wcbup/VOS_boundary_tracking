@@ -73,6 +73,7 @@ def get_res4(device="cuda") -> nn.Module:
     res4 = nn.Sequential(*list(res4.children())[:-3])
     return res4
 
+
 def get_raw_res(device="cuda") -> nn.Module:
     res = resnet50(pretrained=True).to(device)
     res = nn.Sequential(*list(res.children())[:-3])
@@ -155,6 +156,7 @@ class ResDetr(nn.Module):
 
         xy = self.xy_fc(queries).sigmoid() * 224
         return xy
+
 
 class DinoDETR(nn.Module):
     def __init__(self, boundary_num=80, device="cuda"):
@@ -320,7 +322,14 @@ class DinoDetrSimpleFuse(nn.Module):
 
 
 class DinoDetrMaskMul(nn.Module):
-    def __init__(self, mul_before: bool, boundary_num=80, device="cuda"):
+    def __init__(
+        self,
+        mul_before: bool,
+        boundary_num=80,
+        num_layers=1,
+        nhead=1,
+        device="cuda",
+    ):
         super(DinoDetrMaskMul, self).__init__()
         self.mul_before = mul_before
         self.raw_dino = get_raw_dino()
@@ -341,18 +350,18 @@ class DinoDetrMaskMul(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 d_model=self.hidden_dim,
-                nhead=1,
+                nhead=nhead,
                 batch_first=True,
             ),
-            num_layers=1,
+            num_layers=num_layers,
         )
         self.transformer_decoder = nn.TransformerDecoder(
             nn.TransformerDecoderLayer(
                 d_model=self.hidden_dim,
-                nhead=1,
+                nhead=nhead,
                 batch_first=True,
             ),
-            num_layers=1,
+            num_layers=num_layers,
         )
         self.xy_fc = nn.Linear(self.hidden_dim, 2).to(device)
 
