@@ -612,4 +612,7 @@ def get_batch_average_bou_iou(
         intersection = intersection.sum(-1)
         union = pred_sgm.sum(-1) + mask.sum(-1) - intersection
         iou = intersection / union
-        return iou.mean()
+        result = iou.mean()
+        if torch.isnan(result):
+            return torch.tensor(0.0).to(iou.device)
+        return result

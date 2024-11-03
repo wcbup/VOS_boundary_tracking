@@ -32,6 +32,7 @@ from deform_model import (
     get_batch_average_bou_iou,
 )
 import math
+from preprocess_utensils import Boundary_points
 
 
 class DAVIS_withPoint(Dataset):
@@ -1238,6 +1239,340 @@ class DeformLightVideoPos(nn.Module):
             valid_ratios=valid_ratios,
         )
         return src_flatten, spatial_shapes, level_start_index, valid_ratios
+
+
+class RefineLightPos(nn.Module):
+    def __init__(
+        self,
+        layer_num=1,
+        head_num=6,
+        medium_level_size=[14, 28, 56, 112],
+        offset_limit=10,
+        n_points=4,
+        freeze_backbone=True,
+    ) -> None:
+        super(RefineLightPos, self).__init__()
+        mem_point_num = 64
+        self.offset_limit = offset_limit
+        self.n_points = n_points
+        self.point_num = mem_point_num
+        self.medium_level_size = medium_level_size
+        self.featup = torch.hub.load(
+            "mhamilton723/FeatUp",
+            "dino16",
+            use_norm=True,
+        )
+        if freeze_backbone:
+            for param in self.featup.parameters():
+                param.requires_grad = False
+        d_model = 384
+        d_ffn = 1024
+        n_levels = len(medium_level_size) + 1
+        self.pos_enoc = PositionalEncoding(d_model)
+        self.level_pos = nn.Embedding(n_levels, d_model)
+        self.img_pos = IMGPositionEmbeddingSine(d_model=d_model)
+        xavier_uniform_(self.level_pos.weight)
+
+        enc_layer = DeformableTransformerEncoderLayer(
+            d_model=d_model,
+            d_ffn=d_ffn,
+            n_levels=n_levels,
+            n_heads=head_num,
+            n_points=n_points,
+        )
+        dec_layer = DeformableTransformerDecoderLayer(
+            d_model=d_model,
+            d_ffn=d_ffn,
+            n_levels=n_levels,
+            n_heads=head_num,
+            n_points=n_points,
+        )
+
+        self.first_query_embed = nn.Embedding(mem_point_num, d_model)
+        xavier_uniform_(self.first_query_embed.weight)
+        self.first_layer_norm = nn.LayerNorm(d_model)
+        self.fir_enc = DeformableTransformerEncoder(
+            enc_layer,
+            num_layers=layer_num,
+        )
+        self.fir_dec = DeformableTransformerDecoder(
+            dec_layer,
+            num_layers=layer_num,
+        )
+        self.previous_query_embed = nn.Embedding(mem_point_num, d_model)
+        xavier_uniform_(self.previous_query_embed.weight)
+        self.previous_layer_norm = nn.LayerNorm(d_model)
+        self.pre_enc = DeformableTransformerEncoder(
+            enc_layer,
+            num_layers=layer_num,
+        )
+        self.pre_dec = DeformableTransformerDecoder(
+            dec_layer,
+            num_layers=layer_num,
+        )
+        self.extra_layer_norm = nn.LayerNorm(d_model)
+
+        self.cur_enc = DeformableTransformerEncoder(
+            enc_layer,
+            num_layers=layer_num,
+        )
+        self.current_layer_norm = nn.LayerNorm(d_model)
+        self.cur_64_query_embed = nn.Embedding(mem_point_num, d_model)
+        xavier_uniform_(self.cur_64_query_embed.weight)
+        extra_dec_layer = DeformableTransformerExtraDecoderLayer(
+            d_model=d_model,
+            d_ffn=d_ffn,
+            n_levels=n_levels,
+            n_heads=head_num,
+            n_points=n_points,
+        )
+        self.cur_64_dec = DeformableTransformerExtraDecoder(
+            extra_dec_layer,
+            num_layers=layer_num,
+        )
+        xy_fc = MLP(d_model, d_model, 2, 3)
+        self.xy_fcs = _get_clones(xy_fc, 2)
+
+        self.cur_32_query_embed = nn.Embedding(mem_point_num // 2, d_model)
+        xavier_uniform_(self.cur_32_query_embed.weight)
+        self.cur_32_layer_norm = nn.LayerNorm(d_model)
+        self.cur_32_dec = DeformableTransformerExtraDecoder(
+            extra_dec_layer,
+            num_layers=layer_num,
+        )
+
+    def forward(
+        self,
+        fir_img: torch.Tensor,
+        fir_bou: torch.Tensor,
+        pre_img: torch.Tensor,
+        pre_bou: torch.Tensor,
+        pre_sgm: torch.Tensor,
+        cur_img: torch.Tensor,
+    ):
+        fir_bou = fir_bou / 224
+        pre_bou = pre_bou / 224
+        (
+            fir_img_srcs_flatten,
+            fir_spatial_shapes,
+            fir_level_start_index,
+            fir_valid_ratios,
+        ) = self._get_enced_img_scrs(
+            fir_img,
+            self.fir_enc,
+            self.first_layer_norm,
+        )
+        (
+            pre_img_srcs_flatten,
+            pre_spatial_shapes,
+            pre_level_start_index,
+            pre_valid_ratios,
+        ) = self._get_enced_img_scrs(
+            pre_img,
+            self.pre_enc,
+            self.previous_layer_norm,
+        )
+        (
+            cur_img_srcs_flatten,
+            cur_spatial_shapes,
+            cur_level_start_index,
+            cur_valid_ratios,
+        ) = self._get_enced_img_scrs(
+            cur_img,
+            self.cur_enc,
+            self.current_layer_norm,
+        )
+
+        B, S, C = fir_img_srcs_flatten.shape
+        first_queries = (
+            self.first_query_embed.weight.unsqueeze(0).repeat(B, 1, 1).cuda()
+        )
+        first_memory, _ = self.fir_dec(
+            first_queries,
+            fir_bou,
+            fir_img_srcs_flatten,
+            fir_spatial_shapes,
+            fir_level_start_index,
+            fir_valid_ratios,
+        )
+        previous_queries = (
+            self.previous_query_embed.weight.unsqueeze(0).repeat(B, 1, 1).cuda()
+        )
+        previous_memory, _ = self.pre_dec(
+            previous_queries,
+            pre_bou,
+            pre_img_srcs_flatten,
+            pre_spatial_shapes,
+            pre_level_start_index,
+            pre_valid_ratios,
+        )
+        extra_memory = torch.cat([first_memory, previous_memory], 1)
+        extra_memory = self.extra_layer_norm(extra_memory)
+        extra_memory = self.pos_enoc(extra_memory)
+
+        results = []
+        cur_bou = pre_bou
+        cur_bou = self._get_result(
+            self.cur_64_query_embed,
+            self.cur_64_dec,
+            cur_bou,
+            cur_img_srcs_flatten,
+            cur_spatial_shapes,
+            cur_level_start_index,
+            cur_valid_ratios,
+            extra_memory,
+            self.xy_fcs[0],
+        )
+        results.append(cur_bou)
+        cur_bou = self._simplify_bou_batch(cur_bou, 32)
+        cur_bou = self._get_result(
+            self.cur_32_query_embed,
+            self.cur_32_dec,
+            cur_bou,
+            cur_img_srcs_flatten,
+            cur_spatial_shapes,
+            cur_level_start_index,
+            cur_valid_ratios,
+            extra_memory,
+            self.xy_fcs[1],
+        )
+        results.append(cur_bou)
+        cur_bou = add_mid_points(cur_bou)
+        cur_bou = self._get_result(
+            self.cur_64_query_embed,
+            self.cur_64_dec,
+            cur_bou,
+            cur_img_srcs_flatten,
+            cur_spatial_shapes,
+            cur_level_start_index,
+            cur_valid_ratios,
+            extra_memory,
+            self.xy_fcs[0],
+        )
+        results.append(cur_bou)
+        results = [result * 224 for result in results]
+        if self.training:
+            return results
+        else:
+            return results[-1].clamp(0, 223)
+
+    def _get_result(
+        self,
+        query_embed: nn.Embedding,
+        dec: DeformableTransformerExtraDecoder,
+        cur_bou: torch.Tensor,
+        img_srcs_flatten: torch.Tensor,
+        spatial_shapes: torch.Tensor,
+        level_start_index: torch.Tensor,
+        valid_ratios: torch.Tensor,
+        extra_memory: torch.Tensor,
+        xy_fc: MLP,
+    ):
+        queries = query_embed.weight.unsqueeze(0).repeat(cur_bou.shape[0], 1, 1).cuda()
+        decode_output, _ = dec(
+            queries,
+            cur_bou,
+            img_srcs_flatten,
+            spatial_shapes,
+            level_start_index,
+            valid_ratios,
+            extra_memory,
+        )
+        xy_offset = xy_fc(decode_output)
+        xy_offset = (xy_offset.sigmoid() - 0.5) * self.offset_limit / 224
+        result = cur_bou + xy_offset
+
+        return result
+
+    def _get_img_scrs(self, img: torch.Tensor, layernorm: nn.LayerNorm):
+        feats = self.featup(img)
+        srcs = []
+        padding_masks = []
+        pos_embeds = []
+        for low_res in self.medium_level_size:
+            srcs.append(
+                F.interpolate(
+                    feats,
+                    size=(low_res, low_res),
+                    mode="bilinear",
+                ),
+            )
+        srcs.append(feats)
+        for src in srcs:
+            padding_masks.append(torch.zeros_like(src[:, 0:1, :, :]).squeeze(1).bool())
+            pos_embeds.append(self.img_pos(src, padding_masks[-1]))
+        src_flatten = []
+        spatial_shapes = []
+        pos_embed_flatten = []
+        # for src in srcs:
+        # for src, pos in zip(srcs, pos_embeds):
+        for lvl, (src, pos) in enumerate(zip(srcs, pos_embeds)):
+            src_flatten.append(
+                rearrange(src, "b c h w -> b (h w) c"),
+            )
+            spatial_shapes.append(src.shape[-2:])
+            pos = rearrange(pos, "b c h w -> b (h w) c")
+            pos = self.level_pos.weight[lvl].view(1, 1, -1) + pos
+            pos_embed_flatten.append(pos)
+
+        level_start_index = torch.cat(
+            (
+                torch.tensor([0]),
+                torch.cumsum(
+                    torch.tensor([x.shape[1] for x in src_flatten]),
+                    0,
+                )[:-1],
+            )
+        ).cuda()
+        src_flatten = torch.cat(src_flatten, 1).cuda()
+        pos_embed_flatten = torch.cat(pos_embed_flatten, 1).cuda()
+        valid_ratios = torch.stack(
+            [get_valid_ratio(mask) for mask in padding_masks],
+            1,
+        ).cuda()
+        spatial_shapes = torch.as_tensor(
+            spatial_shapes,
+            dtype=torch.long,
+            device=src_flatten.device,
+        )
+        src_flatten = layernorm(src_flatten)
+        # src_flatten = self.pos_enoc(src_flatten)
+
+        return (
+            src_flatten,
+            spatial_shapes,
+            level_start_index,
+            valid_ratios,
+            pos_embed_flatten,
+        )
+
+    def _get_enced_img_scrs(
+        self,
+        img: torch.Tensor,
+        encoder: DeformableTransformerEncoder,
+        layernorm: nn.LayerNorm,
+    ):
+        (
+            src_flatten,
+            spatial_shapes,
+            level_start_index,
+            valid_ratios,
+            pos_embed_flatten,
+        ) = self._get_img_scrs(img, layernorm)
+        src_flatten += pos_embed_flatten
+        src_flatten = encoder(
+            src=src_flatten,
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index,
+            valid_ratios=valid_ratios,
+        )
+        return src_flatten, spatial_shapes, level_start_index, valid_ratios
+
+    def _simplify_bou_batch(self, bous, num_points):
+        bous = bous.detach().cpu().numpy()
+        bous = [Boundary_points(bou).simplify_to_num(num_points) for bou in bous]
+        bous = np.stack(bous)
+        return torch.tensor(bous).cuda().float()
 
 
 class DAVIS_withPointSet(Dataset):
