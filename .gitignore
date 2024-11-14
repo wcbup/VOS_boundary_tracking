@@ -23,3 +23,5 @@ sample_results
 tmp.json
 all_image.ipynb
 coco
+dift/
+guided-diffusion/
