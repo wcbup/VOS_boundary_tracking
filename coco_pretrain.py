@@ -222,3 +222,120 @@ class CocoPretrainDataset(Dataset):
             "curr_mask": cur_frame_mask,
             "curr_boundary": curr_boundary,
         }
+
+
+class AffineVideoGenerator:
+    def __init__(self, frame_num: int) -> None:
+        self.shift_params = dict(
+            angle=(-10, 10),
+            translate=(-0.05, 0.05),
+            scale=(-0.1, 0.1),
+            shear=(-10, 10),
+        )
+        self.frame_num = frame_num
+
+    def __call__(self, img: tv_tensors.Image, mask: tv_tensors.Mask) -> tuple[
+        tuple[tv_tensors.Image, tv_tensors.Mask],
+        tuple[tv_tensors.Image, tv_tensors.Mask],
+    ]:
+        shift_angle = 0
+        shift_translate = (0, 0)
+        shift_scale = 1
+        shift_shear = 0
+        imgs = [img]
+        masks = [mask]
+        for i in range(1, self.frame_num):
+            shift_angle += random.uniform(*self.shift_params["angle"])
+            shift_translate = (
+                shift_translate[0] + random.uniform(*self.shift_params["translate"]),
+                shift_translate[1] + random.uniform(*self.shift_params["translate"]),
+            )
+            shift_scale += random.uniform(*self.shift_params["scale"])
+            shift_shear += random.uniform(*self.shift_params["shear"])
+            if shift_scale < 0.1:
+                shift_scale = 0.1
+            imgs.append(
+                v2.functional.affine(
+                    img,
+                    angle=shift_angle,
+                    translate=shift_translate,
+                    scale=shift_scale,
+                    shear=shift_shear,
+                )
+            )
+            masks.append(
+                v2.functional.affine(
+                    mask,
+                    angle=shift_angle,
+                    translate=shift_translate,
+                    scale=shift_scale,
+                    shear=shift_shear,
+                )
+            )
+        return (imgs, masks)
+
+
+class CocoVideoDataset(Dataset):
+    def __init__(
+        self,
+        dataset: datasets.CocoDetection,
+        small_subset=False,
+        point_num=32,
+        frame_num=10,
+        dataset_size=None,
+    ) -> None:
+        super().__init__()
+        self.pre_transformer = PreTransformer()
+        self.video_generator = AffineVideoGenerator(frame_num)
+        self.point_num = point_num
+        self.dataset = datasets.wrap_dataset_for_transforms_v2(
+            dataset, target_keys=["masks"]
+        )
+        if small_subset:
+            self.dataset = torch.utils.data.Subset(self.dataset, range(10))
+        self.gt_rasterizer = SoftPolygon(1, "hard_mask").cuda()
+        self.dataset_size = dataset_size
+
+    def __len__(self) -> int:
+        if self.dataset_size is not None:
+            return self.dataset_size
+        return len(self.dataset)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # randomly choose one image
+        def _get_new_idx():
+            while True:
+                random.seed()
+                idx = random.randint(0, len(self.dataset) - 1)
+                sample = self.dataset[idx]
+                if "masks" in sample[1]:
+                    return idx
+
+        def _get_boundary_points(mask: torch.Tensor) -> torch.Tensor:
+            boundary = get_boundary_points(mask.numpy())
+            boundary = uniform_sample_points(boundary, self.point_num)
+            boundary = torch.tensor(boundary, dtype=torch.float32)
+            return boundary
+
+        while True:
+            idx = _get_new_idx()
+            sample = self.dataset[idx]
+            img, target = sample
+            mask = target["masks"]
+            resized_img, resized_mask = self.pre_transformer(img, mask)
+            rand_mask_idx = random.randint(0, len(resized_mask) - 1)
+            resized_mask = tv_tensors.Mask(resized_mask[rand_mask_idx])
+            imgs, masks = self.video_generator(resized_img, resized_mask)
+            # check if all masks are valid
+            if all(mask.sum() > 0 for mask in masks):
+                points = []
+                for mask in masks:
+                    boundary_points = _get_boundary_points(mask)
+                    points.append(boundary_points)
+                # check if all points' shape is (point_num, 2)
+                if all(point.shape == (self.point_num, 2) for point in points):
+                    break
+        imgs = torch.stack(imgs)
+        masks = torch.stack(masks)
+        points = torch.stack(points)
+        return imgs, masks, points

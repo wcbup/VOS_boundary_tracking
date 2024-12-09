@@ -24,6 +24,7 @@ import gc
 from polygon import SoftPolygon, RasLoss
 import random
 from tqdm import tqdm
+from preprocess_utensils import get_boundary_points, uniform_sample_points
 
 
 class DAVIS_Video(Dataset):
@@ -346,17 +347,26 @@ class VideoLoss(nn.Module):
         return total_loss, iou
 
 
+def _get_boundary_points(mask: torch.Tensor, point_num: int) -> torch.Tensor:
+    boundary = get_boundary_points(mask.numpy().astype(np.uint8))
+    boundary = uniform_sample_points(boundary, point_num)
+    boundary = torch.tensor(boundary, dtype=torch.float32)
+    return boundary
+
+
 class CoEvaler:
     def __init__(
         self,
         raw_set: list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]],
         gt_rasterizer: SoftPolygon,
         frame_num: int = 10,
+        use_uniform_points: bool = False,
     ):
         self.raw_set = raw_set
         self.frame_num = frame_num
         self.gt_rasterizer = gt_rasterizer
         self.total_pred_results = []
+        self.use_uniform_points = use_uniform_points
 
     def eval_one_video(self, video_idx: int, model: Cotracker):
         video_data = self.raw_set[video_idx]
@@ -386,6 +396,10 @@ class CoEvaler:
             mask_list = []
             point_list = []
             fir_point = video_data[0][2]
+            if self.use_uniform_points:
+                fir_point = _get_boundary_points(video_data[0][1], 32)
+                if fir_point.shape[0] != 32 or len(fir_point.shape) != 2:
+                    fir_point = video_data[0][2]
             for frame_idx in selected_frame_idxs:
                 img, mask, point = video_data[frame_idx]
                 img_list.append(img)
@@ -862,42 +876,6 @@ class CoEvalerIter:
             plt.imshow(mask, alpha=mask_alpha)
         plt.show()
 
-class DAVIS_Windows(Dataset):
-    def __init__(
-        self,
-        raw_set: list[list[tuple[torch.Tensor, torch.Tensor]]],
-        window_size: int,
-    ):
-        self.raw_set = raw_set
-        self.window_size = window_size
-    
-    def __len__(self):
-        return len(self.raw_set)
-    
-    def __getitem__(self, idx: int):
-        video_data = self.raw_set[idx]
-        video_len = len(video_data)
-        start_min = 0
-        start_max = video_len - self.window_size - 1
-        if start_max < start_min:
-            start_idx = 0
-            window_size = video_len
-        else:
-            start_idx = random.randint(start_min, start_max)
-            window_size = self.window_size
-        img_list = []
-        mask_list = []
-        point_list = []
-        for i in range(window_size):
-            img, mask, point = video_data[start_idx + i]
-            img_list.append(img)
-            mask_list.append(mask)
-            point_list.append(point)
-        imgs = torch.stack(img_list, 0)
-        masks = torch.stack(mask_list, 0)
-        points = torch.stack(point_list, 0)
-        return imgs, masks, points
-    
 
 class DAVIS_Windows(Dataset):
     def __init__(
@@ -907,10 +885,10 @@ class DAVIS_Windows(Dataset):
     ):
         self.raw_set = raw_set
         self.window_size = window_size
-    
+
     def __len__(self):
         return len(self.raw_set)
-    
+
     def __getitem__(self, idx: int):
         video_data = self.raw_set[idx]
         video_len = len(video_data)
@@ -934,7 +912,44 @@ class DAVIS_Windows(Dataset):
         masks = torch.stack(mask_list, 0)
         points = torch.stack(point_list, 0)
         return imgs, masks, points
-    
+
+
+class DAVIS_Windows(Dataset):
+    def __init__(
+        self,
+        raw_set: list[list[tuple[torch.Tensor, torch.Tensor]]],
+        window_size: int,
+    ):
+        self.raw_set = raw_set
+        self.window_size = window_size
+
+    def __len__(self):
+        return len(self.raw_set)
+
+    def __getitem__(self, idx: int):
+        video_data = self.raw_set[idx]
+        video_len = len(video_data)
+        start_min = 0
+        start_max = video_len - self.window_size - 1
+        if start_max < start_min:
+            start_idx = 0
+            window_size = video_len
+        else:
+            start_idx = random.randint(start_min, start_max)
+            window_size = self.window_size
+        img_list = []
+        mask_list = []
+        point_list = []
+        for i in range(window_size):
+            img, mask, point = video_data[start_idx + i]
+            img_list.append(img)
+            mask_list.append(mask)
+            point_list.append(point)
+        imgs = torch.stack(img_list, 0)
+        masks = torch.stack(mask_list, 0)
+        points = torch.stack(point_list, 0)
+        return imgs, masks, points
+
 
 class CoWinEvaler:
     def __init__(
@@ -1029,12 +1044,12 @@ class CoWinEvaler:
             iou, pred_results = self.eval_one_video(video_idx, model)
             self.total_pred_results.append((iou, pred_results))
         return self.compute_avg_iou()
-    
+
     def show_iou_distribution(self):
         iou_list = [iou for iou, _ in self.total_pred_results]
         plt.hist(iou_list, bins=20)
         plt.show()
-    
+
     def show_video_result(
         self,
         video_idx: int,
@@ -1052,8 +1067,12 @@ class CoWinEvaler:
             plt.axis("off")
             img, mask, point = video_data[i]
             plt.imshow(normalize(img).permute(1, 2, 0))
-            iou = get_batch_average_bou_iou(pred_point.unsqueeze(0).cuda(), mask.unsqueeze(0).cuda(), gt_rasterizer).item()
+            iou = get_batch_average_bou_iou(
+                pred_point.unsqueeze(0).cuda(), mask.unsqueeze(0).cuda(), gt_rasterizer
+            ).item()
             plt.title(f"IoU: {iou:.4f}")
             plt.scatter(pred_point[:, 0], pred_point[:, 1], c="r", s=5)
             plt.plot(pred_point[:, 0], pred_point[:, 1], c="r")
             plt.imshow(mask, alpha=mask_alpha)
+
+
