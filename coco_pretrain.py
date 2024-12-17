@@ -19,6 +19,7 @@ import torch.optim as optim
 import cv2 as cv
 from preprocess_utensils import get_boundary_points, uniform_sample_points
 import gc
+import glob
 
 
 class PreTransformer:
@@ -338,4 +339,163 @@ class CocoVideoDataset(Dataset):
         imgs = torch.stack(imgs)
         masks = torch.stack(masks)
         points = torch.stack(points)
+        return imgs, masks, points
+
+
+class ECSSD_dataset(Dataset):
+    def __init__(self):
+        root_path = pathlib.Path("static_image/ecssd")
+        self.img_path = root_path / "images"
+        self.mask_path = root_path / "ground_truth_mask"
+        self.names = [p.stem for p in self.img_path.glob("*.jpg")]
+        self.names.sort()
+
+    def __len__(self):
+        return len(self.names)
+
+    def __getitem__(self, idx):
+        img_path = self.img_path / (self.names[idx] + ".jpg")
+        mask_path = self.mask_path / (self.names[idx] + ".png")
+        img = Image.open(img_path)
+        img = tv_tensors.Image(img)
+        mask = Image.open(mask_path)
+        mask = tv_tensors.Mask(mask)
+        return img, mask
+
+
+class FSS1000_dataset(Dataset):
+    def __init__(self):
+        root_path = pathlib.Path("static_image/fss1000")
+        # recursive search
+        self.img_paths = glob.glob(str(root_path / "**" / "*.jpg"), recursive=True)
+        self.img_paths = [pathlib.Path(p) for p in self.img_paths]
+        self.img_paths.sort()
+        self.mask_paths = [p.parent / (p.stem + ".png") for p in self.img_paths]
+        self.mask_paths.sort()
+
+    def __len__(self):
+        return len(self.img_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.img_paths[idx]
+        mask_path = self.mask_paths[idx]
+        img = Image.open(img_path)
+        img = tv_tensors.Image(img)
+        mask = Image.open(mask_path)
+        mask = tv_tensors.Mask(mask)
+        return img, mask
+
+
+class HRSOD_dataset(Dataset):
+    def __init__(self):
+        root_path = pathlib.Path("static_image/hrsod")
+        self.img_paths = glob.glob(str(root_path / "**" / "*.jpg"), recursive=True)
+        self.img_paths = [pathlib.Path(p) for p in self.img_paths]
+        self.img_paths.sort()
+        self.mask_paths = glob.glob(str(root_path / "**" / "*.png"), recursive=True)
+        self.mask_paths = [pathlib.Path(p) for p in self.mask_paths]
+        self.mask_paths.sort()
+
+    def __len__(self):
+        return len(self.img_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.img_paths[idx]
+        mask_path = self.mask_paths[idx]
+        img = Image.open(img_path)
+        img = tv_tensors.Image(img)
+        mask = Image.open(mask_path)
+        mask = tv_tensors.Mask(mask)
+        return img, mask
+
+
+class BIG_dataset(Dataset):
+    def __init__(self):
+        root_path = pathlib.Path("static_image/big")
+        self.img_paths = glob.glob(str(root_path / "**" / "*.jpg"), recursive=True)
+        self.img_paths = [pathlib.Path(p) for p in self.img_paths]
+        self.img_paths.sort()
+        self.mask_paths = glob.glob(str(root_path / "**" / "*.png"), recursive=True)
+        self.mask_paths = [pathlib.Path(p) for p in self.mask_paths]
+        self.mask_paths.sort()
+
+    def __len__(self):
+        return len(self.img_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.img_paths[idx]
+        mask_path = self.mask_paths[idx]
+        img = Image.open(img_path)
+        img = tv_tensors.Image(img)
+        mask = Image.open(mask_path)
+        mask = tv_tensors.Mask(mask)
+        return img, mask
+
+
+class DUTS_dataset(Dataset):
+    def __init__(self):
+        root_path = pathlib.Path("static_image/duts")
+        self.img_paths = glob.glob(str(root_path / "**" / "*.jpg"), recursive=True)
+        self.img_paths = [pathlib.Path(p) for p in self.img_paths]
+        self.img_paths.sort()
+        self.mask_paths = glob.glob(str(root_path / "**" / "*.png"), recursive=True)
+        self.mask_paths = [pathlib.Path(p) for p in self.mask_paths]
+        self.mask_paths.sort()
+
+    def __len__(self):
+        return len(self.img_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.img_paths[idx]
+        mask_path = self.mask_paths[idx]
+        img = Image.open(img_path)
+        img = tv_tensors.Image(img)
+        mask = Image.open(mask_path)
+        mask = tv_tensors.Mask(mask)
+        return img, mask
+
+
+class StaticVideoDataset(Dataset):
+    def __init__(
+        self,
+        dataset_list: list[Dataset],
+        frame_num: int,
+        point_num: int,
+    ):
+        super().__init__()
+        self.dataset_list = dataset_list
+        self.pre_transformer = PreTransformer()
+        self.video_generator = AffineVideoGenerator(frame_num)
+        self.frame_num = frame_num
+        self.point_num = point_num
+
+    def __len__(self):
+        return len(self.dataset_list)
+
+    def __getitem__(self, idx) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        dataset = self.dataset_list[idx]
+
+        def _get_new_idx():
+            return random.randint(0, len(dataset) - 1)
+
+        def _get_boundary_points(mask: torch.Tensor) -> torch.Tensor:
+            boundary = get_boundary_points(mask.numpy())
+            boundary = uniform_sample_points(boundary, self.point_num)
+            boundary = torch.tensor(boundary, dtype=torch.float32)
+            return boundary
+
+        while True:
+            idx = _get_new_idx()
+            img, mask = dataset[idx]
+            resized_img, resized_mask = self.pre_transformer(img, mask)
+            imgs, masks = self.video_generator(resized_img, resized_mask)
+            imgs = torch.stack(imgs)
+            masks = torch.stack(masks)
+            masks = masks[:, 0]
+            masks[masks != 0] = 1
+            if all([m.sum() > 0 for m in masks]):
+                points = [_get_boundary_points(m) for m in masks]
+                if all([p.shape == (self.point_num, 2) for p in points]):
+                    points = torch.stack(points)
+                    break
         return imgs, masks, points

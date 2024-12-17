@@ -1076,3 +1076,215 @@ class CoWinEvaler:
             plt.imshow(mask, alpha=mask_alpha)
 
 
+class CotrackerLight(nn.Module):
+    def __init__(
+        self,
+        point_num: int,
+        refine_iter: int = 1,
+        freeze_featup: bool = True,
+        d_model: int = 128,
+        n_heads: int = 8,
+        n_points: int = 4,
+        d_ffn: int = 512,
+        n_layers: int = 1,
+        offset_ratio: float = 1.0,
+    ):
+        super(CotrackerLight, self).__init__()
+        self.refine_iter = refine_iter
+        self.featup = torch.hub.load(
+            "mhamilton723/FeatUp",
+            "dino16",
+            use_norm=True,
+        )
+        if freeze_featup:
+            for param in self.featup.parameters():
+                param.requires_grad = False
+        d_featup = 384
+        if d_featup != d_model:
+            self.featup_fc = nn.Linear(d_featup, d_model)
+        else:
+            self.featup_fc = nn.Identity()
+        self.medium_level_size = [14, 28, 56, 112]
+        n_levels = len(self.medium_level_size) + 1
+        self.offset_ratio = offset_ratio
+        self.pos_2d = IMGPositionEmbeddingSine(d_model)
+        self.pos_1d = PositionalEncoding(d_model)
+        self.level_pos = nn.Embedding(n_levels, d_model)
+        nn.init.xavier_uniform_(self.level_pos.weight)
+
+        self.query_embed = nn.Embedding(point_num, d_model)
+        nn.init.xavier_uniform_(self.query_embed.weight)
+        dec_layer = DeformableTransformerDecoderLayer(
+            d_model=d_model,
+            d_ffn=d_ffn,
+            n_levels=n_levels,
+            n_heads=n_heads,
+            n_points=n_points,
+        )
+        self.def_dec_layernorm = nn.LayerNorm(d_model)
+        self.def_decoder = DeformableTransformerDecoder(
+            decoder_layer=dec_layer,
+            num_layers=n_layers,
+        )
+        self.fir_layernorm = nn.LayerNorm(d_model)
+        self.fir_encoder = nn.TransformerEncoder(
+            encoder_layer=nn.TransformerEncoderLayer(
+                d_model,
+                n_heads,
+                d_ffn,
+                batch_first=True,
+            ),
+            num_layers=n_layers,
+        )
+        self.other_layernorm = nn.LayerNorm(d_model)
+        self.other_decoder = nn.TransformerDecoder(
+            decoder_layer=nn.TransformerDecoderLayer(
+                d_model,
+                n_heads,
+                d_ffn,
+                batch_first=True,
+            ),
+            num_layers=n_layers,
+        )
+        self.delta_xy_fc = MLP(d_model, d_model, 2, 2)
+
+    def forward(self, imgs: torch.Tensor, points: torch.Tensor):
+        batch_size, frame_num, _, img_h, img_w = imgs.shape
+        _, _, point_num, _ = points.shape
+
+        points = points / 224.0
+
+        fir_img = imgs[:, 0]
+        fir_points = points[:, 0]
+        (
+            fir_src_flatten,
+            fir_spatial_shapes,
+            fir_level_start_index,
+            fir_valid_ratios,
+            fir_pos_embed_flatten,
+        ) = self._get_img_scrs(fir_img, self.def_dec_layernorm)
+        fir_src_flatten += fir_pos_embed_flatten
+        fir_query_embed = repeat(self.query_embed.weight, "p d -> b p d", b=batch_size)
+        fir_point_feats, _ = self.def_decoder(
+            fir_query_embed,
+            fir_points,
+            fir_src_flatten,
+            fir_spatial_shapes,
+            fir_level_start_index,
+            fir_valid_ratios,
+        )
+        fir_point_feats = self.fir_layernorm(fir_point_feats)
+        fir_query = self.pos_1d(fir_point_feats)
+        fir_memory = self.fir_encoder(fir_query)
+
+        other_imgs = imgs[:, 1:]
+        other_points = points[:, 1:]
+        other_imgs = rearrange(other_imgs, "b f c h w -> (b f) c h w")
+        other_points = rearrange(other_points, "b f p d -> (b f) p d")
+        (
+            other_src_flatten,
+            other_spatial_shapes,
+            other_level_start_index,
+            other_valid_ratios,
+            other_pos_embed_flatten,
+        ) = self._get_img_scrs(other_imgs, self.def_dec_layernorm)
+        other_src_flatten += other_pos_embed_flatten
+        other_queries = repeat(
+            self.query_embed.weight, "p d -> b p d", b=batch_size * (frame_num - 1)
+        )
+
+        output_coords = []
+        other_point_feats, _ = self.def_decoder(
+            other_queries,
+            other_points,
+            other_src_flatten,
+            other_spatial_shapes,
+            other_level_start_index,
+            other_valid_ratios,
+        )
+        other_point_queries = rearrange(
+            other_point_feats, "(b f)p d -> b (f p) d", f=frame_num - 1
+        )
+        other_point_queries = self.other_layernorm(other_point_queries)
+        other_point_queries = self.pos_1d(other_point_queries)
+        other_point_queries = self.other_decoder(
+            tgt=other_point_queries,
+            memory=fir_memory,
+        )
+        other_point_queries = rearrange(
+            other_point_queries, "b (f p) d -> (b f) p d", f=frame_num - 1
+        )
+        delta_xy = self.delta_xy_fc(other_point_queries)
+        delta_xy = (delta_xy.sigmoid() - 0.5) * self.offset_ratio
+        other_points = other_points + delta_xy
+        result = rearrange(
+            other_points, "(b f) p d -> b f p d", b=batch_size, f=frame_num - 1
+        )
+        result = result * 224.0
+        output_coords.append(result)
+        output_coords = torch.stack(output_coords, 1)
+        return output_coords
+
+    def _get_img_scrs(self, img: torch.Tensor, layernorm: nn.LayerNorm):
+        b, c, h, w = img.shape
+        feats = self.featup(img)
+        feats = rearrange(feats, "b c h w -> b (h w) c")
+        feats = self.featup_fc(feats)
+        feats = rearrange(feats, "b (h w) c -> b c h w", h=h, w=w)
+        srcs = []
+        padding_masks = []
+        pos_embeds = []
+        for low_res in self.medium_level_size:
+            srcs.append(
+                F.interpolate(
+                    feats,
+                    size=(low_res, low_res),
+                    mode="bilinear",
+                ),
+            )
+        srcs.append(feats)
+        for src in srcs:
+            padding_masks.append(torch.zeros_like(src[:, 0:1, :, :]).squeeze(1).bool())
+            pos_embeds.append(self.pos_2d(src, padding_masks[-1]))
+        src_flatten = []
+        spatial_shapes = []
+        pos_embed_flatten = []
+
+        for lvl, (src, pos) in enumerate(zip(srcs, pos_embeds)):
+            src_flatten.append(
+                rearrange(src, "b c h w -> b (h w) c"),
+            )
+            spatial_shapes.append(src.shape[-2:])
+            pos = rearrange(pos, "b c h w -> b (h w) c")
+            pos = self.level_pos.weight[lvl].view(1, 1, -1) + pos
+            pos_embed_flatten.append(pos)
+
+        level_start_index = torch.cat(
+            (
+                torch.tensor([0]),
+                torch.cumsum(
+                    torch.tensor([x.shape[1] for x in src_flatten]),
+                    0,
+                )[:-1],
+            )
+        ).cuda()
+        src_flatten = torch.cat(src_flatten, 1).cuda()
+        pos_embed_flatten = torch.cat(pos_embed_flatten, 1).cuda()
+        valid_ratios = torch.stack(
+            [get_valid_ratio(mask) for mask in padding_masks],
+            1,
+        ).cuda()
+        spatial_shapes = torch.as_tensor(
+            spatial_shapes,
+            dtype=torch.long,
+            device=src_flatten.device,
+        )
+        src_flatten = layernorm(src_flatten)
+
+        return (
+            src_flatten,
+            spatial_shapes,
+            level_start_index,
+            valid_ratios,
+            pos_embed_flatten,
+        )
