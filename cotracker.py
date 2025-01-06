@@ -1288,3 +1288,179 @@ class CotrackerLight(nn.Module):
             valid_ratios,
             pos_embed_flatten,
         )
+
+
+def get_neighbor_points(points: torch.Tensor, deviation: int) -> torch.Tensor:
+    """
+    points: (B, T, N, 2)
+    deviation: int
+    return: (B, T, N, (deviation*2+1)^2, 2)
+    """
+    B, T, N, _ = points.shape
+    offsets = torch.stack(
+        torch.meshgrid(
+            torch.arange(-deviation, deviation + 1),
+            torch.arange(-deviation, deviation + 1),
+            indexing="xy",
+        ),
+        dim=-1,
+    )
+    offsets = rearrange(offsets, "x y k -> (x y) k")
+    neighbor_points = points.unsqueeze(3) + offsets.view(1, 1, 1, -1, 2).to(
+        points.device
+    )
+    return neighbor_points
+
+
+def get_point_feats(
+    imgs: torch.Tensor,
+    points: torch.Tensor,
+    deviation: int,
+) -> torch.Tensor:
+    B, T, N, _ = points.shape
+    neighbor_points = get_neighbor_points(points, deviation)
+    support_points = (neighbor_points / 224 - 0.5) * 2
+    imgs = rearrange(imgs, "B T C H W -> (B T) C H W")
+    support_points = rearrange(support_points, "B T N K C -> (B T) N K C")
+    feats = F.grid_sample(
+        imgs, support_points, align_corners=True, padding_mode="zeros"
+    )
+    feats = rearrange(feats, "(B T) N K C -> B T N K C", B=B, T=T)
+    return feats
+
+
+class CotrackerLightNew(nn.Module):
+    def __init__(
+        self,
+        point_num: int,
+        deviation: int = 2,
+        refine_iter: int = 1,
+        freeze_featup: bool = True,
+        d_model: int = 128,
+        n_heads: int = 8,
+        d_ffn: int = 512,
+        n_layers: int = 1,
+        offset_ratio: float = 1.0,
+    ):
+        super().__init__()
+        self.refine_iter = refine_iter
+        self.deviation = deviation
+        self.featup = torch.hub.load(
+            "mhamilton723/FeatUp",
+            "dino16",
+            use_norm=True,
+        )
+        if freeze_featup:
+            for param in self.featup.parameters():
+                param.requires_grad = False
+        d_featup = 384
+        if d_featup != d_model:
+            self.featup_fc = nn.Linear(d_featup, d_model)
+        else:
+            self.featup_fc = nn.Identity()
+        self.medium_level_size = [14, 28, 56, 112]
+        n_levels = len(self.medium_level_size) + 1
+        self.offset_ratio = offset_ratio
+        self.pos_2d = IMGPositionEmbeddingSine(d_model)
+        self.pos_1d = PositionalEncoding(d_model)
+        self.level_pos = nn.Embedding(n_levels, d_model)
+        nn.init.xavier_uniform_(self.level_pos.weight)
+        point_feat_dim = d_model * n_levels * (self.deviation * 2 + 1) ** 2
+        self.point_mlp = MLP(
+            point_feat_dim,
+            point_feat_dim,
+            d_model,
+            3,
+        )
+        self.fir_layernorm = nn.LayerNorm(d_model)
+        self.fir_encoder = nn.TransformerEncoder(
+            encoder_layer=nn.TransformerEncoderLayer(
+                d_model,
+                n_heads,
+                d_ffn,
+                batch_first=True,
+            ),
+            num_layers=n_layers,
+        )
+        self.other_layernorm = nn.LayerNorm(d_model)
+        self.other_decoder = nn.TransformerDecoder(
+            decoder_layer=nn.TransformerDecoderLayer(
+                d_model,
+                n_heads,
+                d_ffn,
+                batch_first=True,
+            ),
+            num_layers=n_layers,
+        )
+        self.delta_xy_fc = MLP(d_model, d_model, 2, 2)
+
+    def forward(self, imgs: torch.Tensor, points: torch.Tensor):
+        B, T, N, _ = points.shape
+        B, T, C, H, W = imgs.shape
+        imgs = rearrange(imgs, "B T C H W -> (B T) C H W")
+        feats = self.featup(imgs)
+        feats = rearrange(feats, "B C H W -> B (H W) C")
+        feats = self.featup_fc(feats)
+        feats = rearrange(feats, "B (H W) C -> B C H W", H=H, W=W)
+        # feats = rearrange(feats, "(B T) C H W -> B T C H W", B=B, T=T)
+        diff_feats = []
+        for low_res in self.medium_level_size:
+            diff_feats.append(
+                F.interpolate(
+                    feats,
+                    size=(low_res, low_res),
+                    mode="bilinear",
+                )
+            )
+        diff_feats.append(feats)
+        for i, diff_feat in enumerate(diff_feats):
+            padding_mask = torch.zeros_like(diff_feat[:, 0, :, :]).bool()
+            diff_feats[i] += self.pos_2d(diff_feat, padding_mask)
+            diff_feats[i] += repeat(
+                self.level_pos.weight[i],
+                "d -> (B T) d H W",
+                B=B,
+                T=T,
+                H=diff_feat.shape[2],
+                W=diff_feat.shape[3],
+            )
+            diff_feats[i] = rearrange(
+                diff_feats[i], "(B T) C H W -> B T C H W", B=B, T=T
+            )
+        diff_point_feats = []
+        for diff_feat in diff_feats:
+            diff_point_feats.append(
+                get_point_feats(
+                    diff_feat,
+                    points,
+                    self.deviation,
+                )
+            )
+        point_feats = torch.cat(diff_point_feats, dim=-1)
+        point_feats = rearrange(point_feats, "B T C N K -> B T N (C K)")
+        point_feats = rearrange(point_feats, "B T N C -> (B T) N C")
+        point_feats = self.point_mlp(point_feats)
+        point_feats = rearrange(point_feats, "(B T) N C -> B T N C", B=B, T=T)
+        fir_point_feats = point_feats[:, 0]
+        fir_point_feats = self.fir_layernorm(fir_point_feats)
+        fir_point_feats = self.pos_1d(fir_point_feats)
+        fir_memory = self.fir_encoder(fir_point_feats)
+
+        other_point_feats = point_feats[:, 1:]
+        other_point_feats = rearrange(other_point_feats, "B T N C -> B (T N) C")
+        other_point_feats = self.other_layernorm(other_point_feats)
+        other_point_feats = self.pos_1d(other_point_feats)
+        other_point_feats = self.other_decoder(
+            tgt=other_point_feats,
+            memory=fir_memory,
+        )
+        delta_xy = self.delta_xy_fc(other_point_feats)
+        delta_xy = (delta_xy.sigmoid() - 0.5) * self.offset_ratio
+        other_points = points[:, 1:]
+        other_points = rearrange(other_points, "B T N C -> B (T N) C")
+        other_points = other_points + delta_xy * 224
+        result = rearrange(other_points, "B (T N) C -> B T N C", B=B, T=T - 1)
+        output_coords = []
+        output_coords.append(result)
+        output_coords = torch.stack(output_coords, dim=1)
+        return output_coords
